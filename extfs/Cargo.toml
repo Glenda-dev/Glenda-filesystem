@@ -5,4 +5,5 @@ edition = "2021"
 description = "ExtFS driver for Glenda Microkernel, supporting Ext2/3/4"
 
 [dependencies]
+glenda-drivers = { path = "../../lib/libglenda_drivers-rs", package = "libglenda_drivers-rs" }
 libglenda-rs = { path = "../../lib/libglenda-rs", features = ["rt-service"] }

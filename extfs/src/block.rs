@@ -2,7 +2,7 @@ use core::cmp::min;
 use glenda::cap::Endpoint;
 use glenda::error::Error;
 use glenda::ipc::{MsgFlags, MsgTag};
-use glenda::protocol::drivers::block;
+use glenda_drivers::protocol::block;
 
 pub struct BlockReader {
     endpoint: Endpoint,
