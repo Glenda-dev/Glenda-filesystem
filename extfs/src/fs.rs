@@ -1,6 +1,5 @@
 use crate::block::BlockReader;
 use crate::defs::ext4::*;
-use crate::log;
 use crate::ops::ExtOps;
 use crate::versions::ext2::Ext2Ops;
 use crate::versions::ext3::Ext3Ops;

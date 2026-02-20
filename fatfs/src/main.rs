@@ -15,15 +15,11 @@ mod versions;
 
 pub use server::FatFsService;
 
-#[macro_export]
-macro_rules! log {
-    ($($arg:tt)*) => ({
-        glenda::println!("{}FatFS: {}{}", glenda::console::ANSI_BLUE, format_args!($($arg)*), glenda::console::ANSI_RESET);
-    })
-}
+use glenda::{error, log, warn};
 
 #[unsafe(no_mangle)]
 fn main() -> usize {
+    glenda::console::init_logging("FatFS");
     // In a real scenario, we would get the block device capability from the root task or device manager.
     // For now, we assume it's passed or well-known.
     let mut service = FatFsService::new();
