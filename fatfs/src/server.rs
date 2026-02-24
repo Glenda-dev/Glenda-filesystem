@@ -1,7 +1,10 @@
 use crate::fs::FatFs;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use glenda::cap::{CapPtr, Endpoint, Reply};
+use glenda::client::ResourceClient;
 use glenda::error::Error;
-use glenda::interface::fs::FileSystemService;
+use glenda::interface::fs::FileHandleService;
 use glenda::interface::system::SystemService;
 use glenda::ipc::server::handle_call;
 use glenda::ipc::{MsgTag, UTCB};
@@ -11,28 +14,41 @@ use glenda::protocol::{FS_PROTO, PROCESS_PROTO};
 
 pub struct FatFsService {
     fs: Option<FatFs>,
+    handles: BTreeMap<usize, Box<dyn FileHandleService + Send>>,
+    next_handle_id: usize,
     endpoint: Endpoint,
     reply: Reply,
     recv: CapPtr,
     running: bool,
+    ring_vaddr: usize,
+    ring_size: usize,
 }
 
 const RECV_SLOT: CapPtr = CapPtr::from(0x100);
 
 impl FatFsService {
-    pub fn new() -> Self {
+    pub fn new(ring_vaddr: usize, ring_size: usize) -> Self {
         Self {
             fs: None,
+            handles: BTreeMap::new(),
+            next_handle_id: 1,
             endpoint: Endpoint::from(CapPtr::null()),
             reply: Reply::from(CapPtr::null()),
             recv: CapPtr::null(),
             running: false,
+            ring_vaddr,
+            ring_size,
         }
     }
 
-    pub fn init_fs(&mut self, block_device: Endpoint) {
+    pub fn init_fs(
+        &mut self,
+        block_device: Endpoint,
+        res_client: &mut ResourceClient,
+    ) -> Result<(), Error> {
         // Initialize FatFs with the block device
-        self.fs = Some(FatFs::new(block_device));
+        self.fs = Some(FatFs::new(block_device, self.ring_vaddr, self.ring_size, res_client)?);
+        Ok(())
     }
 }
 
@@ -77,8 +93,11 @@ impl SystemService for FatFsService {
                     let mode = u_inner.get_mr(1) as u32;
                     let path = "mock_path"; // TODO
 
-                    let cap = fs.open(path, flags, mode)?;
-                    u_inner.set_mr(0, cap);
+                    let handle = fs.open_handle(path, flags, mode)?;
+                    let id = s.next_handle_id;
+                    s.next_handle_id += 1;
+                    s.handles.insert(id, handle);
+                    u_inner.set_mr(0, id);
                     Ok(())
                 })
             },
@@ -96,6 +115,30 @@ impl SystemService for FatFsService {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let path = "mock_path";
                     fs.unlink(path)?;
+                    Ok(())
+                })
+            },
+            (FS_PROTO, protocol::fs::STAT_PATH) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
+                    let path = "mock_path";
+                    let stat = fs.stat_path(path)?;
+                    u_inner.set_mr(0, stat.size as usize);
+                    u_inner.set_mr(1, stat.mode as usize);
+                    Ok(())
+                })
+            },
+            (FS_PROTO, protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let id = u_inner.get_mr(0);
+                    let offset = u_inner.get_mr(1) as u64;
+                    let len = u_inner.get_mr(2);
+                    let handle = s.handles.get_mut(&id).ok_or(Error::NotFound)?;
+
+                    let mut buf = alloc::vec![0u8; len];
+                    let read_len = handle.read(offset, &mut buf)?;
+                    u_inner.set_mr(0, read_len);
+                    // TODO: copy buffer to UTCB or shared memory
                     Ok(())
                 })
             },
