@@ -83,6 +83,7 @@ impl SystemService for Ext4Service {
     }
 
     fn dispatch(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
+        let badge = utcb.get_badge();
         glenda::ipc_dispatch! {
             self, utcb,
             (FS_PROTO, glenda::protocol::fs::OPEN) => |s: &mut Self, u: &mut UTCB| {
@@ -92,7 +93,7 @@ impl SystemService for Ext4Service {
                     let mode = u_inner.get_mr(1) as u32;
                     let path = "mock_path"; // TODO: read path from IPC buffer
 
-                    let file_handle = fs.open_handle(path, flags, mode)?;
+                    let file_handle = fs.open_handle(badge, path, flags, mode)?;
                     let id = s.next_handle_id;
                     s.next_handle_id += 1;
                     s.handles.insert(id, file_handle);
@@ -106,7 +107,7 @@ impl SystemService for Ext4Service {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let mode = u_inner.get_mr(0) as u32;
                     let path = "mock_path";
-                    fs.mkdir(path, mode)?;
+                    fs.mkdir(badge, path, mode)?;
                     Ok(())
                 })
             },
@@ -114,7 +115,7 @@ impl SystemService for Ext4Service {
                 handle_call(u, |_u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let path = "mock_path";
-                    fs.unlink(path)?;
+                    fs.unlink(badge, path)?;
                     Ok(())
                 })
             },
@@ -122,7 +123,7 @@ impl SystemService for Ext4Service {
                 handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let path = "mock_path";
-                    let stat = fs.stat_path(path)?;
+                    let stat = fs.stat_path(badge, path)?;
                     u_inner.set_mr(0, stat.size as usize);
                     u_inner.set_mr(1, stat.mode as usize);
                     Ok(())
@@ -136,7 +137,7 @@ impl SystemService for Ext4Service {
                     let handle = s.handles.get_mut(&id).ok_or(Error::NotFound)?;
 
                     let mut buf = alloc::vec![0u8; len];
-                    let read_len = handle.read(offset, &mut buf)?;
+                    let read_len = handle.read(badge, offset, &mut buf)?;
                     u_inner.set_mr(0, read_len);
                     Ok(())
                 })

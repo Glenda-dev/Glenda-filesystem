@@ -1,10 +1,11 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use glenda::cap::Endpoint;
+use glenda::cap::{Endpoint, Frame};
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
 use glenda::io::uring::IoUringBuffer;
+use glenda::ipc::Badge;
 use glenda::protocol::fs::{DEntry, OpenFlags, Stat};
 use glenda_drivers::client::block::BlockClient;
 
@@ -29,7 +30,7 @@ pub struct InitrdFile {
 }
 
 impl FileHandleService for InitrdFile {
-    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    fn read(&mut self, _badge: Badge, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         if offset >= self.size {
             return Ok(0);
         }
@@ -63,40 +64,41 @@ impl FileHandleService for InitrdFile {
         Ok(read_len)
     }
 
-    fn write(&mut self, _offset: u64, _buf: &[u8]) -> Result<usize, Error> {
+    fn write(&mut self, _badge: Badge, _offset: u64, _buf: &[u8]) -> Result<usize, Error> {
         Err(Error::PermissionDenied)
     }
 
-    fn stat(&self) -> Result<Stat, Error> {
+    fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
         Ok(Stat { size: self.size, mode: DEFAULT_STAT, ..Default::default() })
     }
 
-    fn getdents(&mut self, _count: usize) -> Result<Vec<DEntry>, Error> {
+    fn getdents(&mut self, _badge: Badge, _count: usize) -> Result<Vec<DEntry>, Error> {
         Err(Error::NotImplemented)
     }
 
-    fn seek(&mut self, _offset: i64, _whence: usize) -> Result<u64, Error> {
+    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<u64, Error> {
         Err(Error::NotImplemented)
     }
 
-    fn sync(&mut self) -> Result<(), Error> {
+    fn sync(&mut self, _badge: Badge) -> Result<(), Error> {
         Ok(())
     }
 
-    fn truncate(&mut self, _size: u64) -> Result<(), Error> {
+    fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
         Err(Error::PermissionDenied)
     }
 
-    fn close(&mut self) -> Result<(), Error> {
+    fn close(&mut self, _badge: Badge) -> Result<(), Error> {
         Ok(())
     }
 
     fn setup_iouring(
         &mut self,
+        _badge: Badge,
         server_vaddr: usize,
         user_vaddr: usize,
         size: usize,
-        frame: Option<glenda::cap::Frame>,
+        frame: Option<Frame>,
     ) -> Result<(), Error> {
         self.server_shm_base = server_vaddr;
         self.user_shm_base = user_vaddr;
@@ -108,7 +110,7 @@ impl FileHandleService for InitrdFile {
         Ok(())
     }
 
-    fn process_iouring(&mut self) -> Result<(), Error> {
+    fn process_iouring(&mut self, _badge: Badge) -> Result<(), Error> {
         if let Some(ring) = self.uring.take() {
             while let Some(sqe) = ring.pop_sqe() {
                 use glenda::io::uring::{IoUringCqe, IOURING_OP_READ};

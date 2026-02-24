@@ -155,8 +155,7 @@ impl<'a> SystemService for InitrdServer<'a> {
     }
 
     fn run(&mut self) -> Result<(), Error> {
-        log!("Mounting InitrdFS to /");
-        self.vfs_client.mount("/", self.endpoint)?;
+        self.vfs_client.mount(Badge::null(), "/", self.endpoint)?;
         self.running = true;
         while self.running {
             let mut utcb = unsafe { UTCB::new() };
@@ -178,7 +177,8 @@ impl<'a> SystemService for InitrdServer<'a> {
     }
 
     fn dispatch(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
-        let badge = utcb.get_badge().bits();
+        let badge = utcb.get_badge();
+        let badge_bits = badge.bits();
         glenda::ipc_dispatch! {
             self, utcb,
             (protocol::FS_PROTO, protocol::fs::OPEN) => |s: &mut Self, u: &mut UTCB| {
@@ -212,8 +212,8 @@ impl<'a> SystemService for InitrdServer<'a> {
             },
             (protocol::FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
-                    if let Some(mut handle) = s.open_files.remove(&badge) {
-                        handle.close()?;
+                    if let Some(mut handle) = s.open_files.remove(&badge_bits) {
+                        handle.close(badge)?;
                         Ok(())
                     } else {
                         Err(Error::InvalidArgs)
@@ -222,28 +222,28 @@ impl<'a> SystemService for InitrdServer<'a> {
             },
             (protocol::FS_PROTO, protocol::fs::STAT) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
-                    let handle = s.open_files.get_mut(&badge).ok_or(Error::InvalidArgs)?;
-                    let stat = handle.stat()?;
+                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
+                    let stat = handle.stat(badge)?;
                     unsafe { u_inner.write_obj(&stat) }.map_err(|_| Error::Unknown)?;
                     Ok(())
                 })
             },
             (protocol::FS_PROTO, protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
-                    let handle = s.open_files.get_mut(&badge).ok_or(Error::InvalidArgs)?;
+                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
                     let len = u_inner.get_mr(0);
                     let offset = u_inner.get_mr(1) as u64;
                     let buf = u_inner.buffer_mut();
                     if len > buf.len() {
                         return Err(Error::InvalidArgs);
                     }
-                    let read_len = handle.read(offset, &mut buf[..len])?;
+                    let read_len = handle.read(badge, offset, &mut buf[..len])?;
                     Ok(read_len)
                 })
             },
             (protocol::FS_PROTO, protocol::fs::SETUP_IOURING) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
-                    let handle = s.open_files.get_mut(&badge).ok_or(Error::InvalidArgs)?;
+                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
                     let addr_user = u_inner.get_mr(1);
                     let size = u_inner.get_mr(2);
 
@@ -262,14 +262,14 @@ impl<'a> SystemService for InitrdServer<'a> {
                         s.res_client.mmap(Badge::null(), f, addr_server, size)?;
                     }
 
-                    handle.setup_iouring(addr_server, addr_user, size, frame)?;
+                    handle.setup_iouring(badge, addr_server, addr_user, size, frame)?;
                     Ok(())
                 })
             },
             (protocol::FS_PROTO, protocol::fs::PROCESS_IOURING) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
-                    let handle = s.open_files.get_mut(&badge).ok_or(Error::InvalidArgs)?;
-                    handle.process_iouring()?;
+                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
+                    handle.process_iouring(badge)?;
                     Ok(())
                 })
             }

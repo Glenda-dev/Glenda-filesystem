@@ -207,19 +207,25 @@ impl ExtFs {
 }
 
 impl FileSystemJournalService for ExtFs {
-    fn transaction_start(&mut self) -> Result<u64, Error> {
+    fn transaction_start(&mut self, _badge: Badge) -> Result<u64, Error> {
         Ok(1)
     }
 
-    fn transaction_commit(&mut self, _tid: u64) -> Result<(), Error> {
+    fn transaction_commit(&mut self, _badge: Badge, _tid: u64) -> Result<(), Error> {
         Ok(())
     }
 
-    fn transaction_abort(&mut self, _tid: u64) -> Result<(), Error> {
+    fn transaction_abort(&mut self, _badge: Badge, _tid: u64) -> Result<(), Error> {
         Ok(())
     }
 
-    fn log_block(&mut self, _tid: u64, block_num: u64, data: &[u8]) -> Result<(), Error> {
+    fn log_block(
+        &mut self,
+        _badge: Badge,
+        _tid: u64,
+        block_num: u64,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let sector = block_num * (self.block_size as u64 / 512);
         self.reader.write_blocks(sector, data)?;
         Ok(())
@@ -231,6 +237,7 @@ impl FileSystemJournalService for ExtFs {
 impl ExtFs {
     pub fn open_handle(
         &mut self,
+        _badge: Badge,
         path: &str,
         _flags: OpenFlags,
         _mode: u32,
@@ -252,19 +259,19 @@ impl ExtFs {
         Ok(Box::new(handle))
     }
 
-    pub fn mkdir(&mut self, _path: &str, _mode: u32) -> Result<(), Error> {
-        let tid = self.transaction_start()?;
-        self.transaction_commit(tid)?;
+    pub fn mkdir(&mut self, badge: Badge, _path: &str, _mode: u32) -> Result<(), Error> {
+        let tid = self.transaction_start(badge)?;
+        self.transaction_commit(badge, tid)?;
         Ok(())
     }
 
-    pub fn unlink(&mut self, _path: &str) -> Result<(), Error> {
-        let tid = self.transaction_start()?;
-        self.transaction_commit(tid)?;
+    pub fn unlink(&mut self, badge: Badge, _path: &str) -> Result<(), Error> {
+        let tid = self.transaction_start(badge)?;
+        self.transaction_commit(badge, tid)?;
         Ok(())
     }
 
-    pub fn stat_path(&mut self, path: &str) -> Result<Stat, Error> {
+    pub fn stat_path(&mut self, _badge: Badge, path: &str) -> Result<Stat, Error> {
         let ino = self.resolve_path(path)?;
         let inode = self.read_inode(ino)?;
         Ok(Stat {
@@ -290,11 +297,11 @@ pub struct ExtFileHandle {
 }
 
 impl FileHandleService for ExtFileHandle {
-    fn close(&mut self) -> Result<(), Error> {
+    fn close(&mut self, _badge: Badge) -> Result<(), Error> {
         Ok(())
     }
 
-    fn stat(&self) -> Result<Stat, Error> {
+    fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
         Ok(Stat {
             size: self.inode.i_size_lo as u64,
             mode: self.inode.i_mode as u32,
@@ -302,7 +309,7 @@ impl FileHandleService for ExtFileHandle {
         })
     }
 
-    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    fn read(&mut self, _badge: Badge, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         let _start_block_idx = (offset / self.block_size as u64) as u32;
         // let end_block_idx = ((offset + buf.len() as u64 + self.block_size as u64 - 1)
         //     / self.block_size as u64) as u32;
@@ -345,7 +352,7 @@ impl FileHandleService for ExtFileHandle {
         Ok(read_len)
     }
 
-    fn write(&mut self, offset: u64, buf: &[u8]) -> Result<usize, Error> {
+    fn write(&mut self, _badge: Badge, offset: u64, buf: &[u8]) -> Result<usize, Error> {
         // Simplified write - assumes no allocation needed for existing blocks or implementing minimal allocation is hard here without FS ref.
         // But writes usually go through FS service for allocation?
         // Wait, `FileHandle::write` is called on the handle. The handle needs access to allocator if extending.
@@ -402,24 +409,25 @@ impl FileHandleService for ExtFileHandle {
         Ok(written)
     }
 
-    fn getdents(&mut self, _count: usize) -> Result<Vec<DEntry>, Error> {
+    fn getdents(&mut self, _badge: Badge, _count: usize) -> Result<Vec<DEntry>, Error> {
         Err(Error::NotImplemented)
     }
 
-    fn seek(&mut self, _offset: i64, _whence: usize) -> Result<u64, Error> {
+    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<u64, Error> {
         Err(Error::NotImplemented)
     }
 
-    fn sync(&mut self) -> Result<(), Error> {
+    fn sync(&mut self, _badge: Badge) -> Result<(), Error> {
         Ok(())
     }
 
-    fn truncate(&mut self, _size: u64) -> Result<(), Error> {
+    fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
         Err(Error::NotImplemented)
     }
 
     fn setup_iouring(
         &mut self,
+        _badge: Badge,
         server_vaddr: usize,
         client_vaddr: usize,
         size: usize,
@@ -437,7 +445,7 @@ impl FileHandleService for ExtFileHandle {
         Ok(())
     }
 
-    fn process_iouring(&mut self) -> Result<(), Error> {
+    fn process_iouring(&mut self, _badge: Badge) -> Result<(), Error> {
         if let Some(ring) = self.uring.take() {
             while let Some(sqe) = ring.pop_sqe() {
                 use glenda::io::uring::{IoUringCqe, IOURING_OP_READ};

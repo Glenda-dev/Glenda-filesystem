@@ -441,7 +441,7 @@ impl FatFileHandle {
 }
 
 impl FileHandleService for FatFileHandle {
-    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    fn read(&mut self, _badge: Badge, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         if offset >= self.size {
             return Ok(0);
         }
@@ -487,40 +487,41 @@ impl FileHandleService for FatFileHandle {
         Ok(read_len)
     }
 
-    fn write(&mut self, _offset: u64, _buf: &[u8]) -> Result<usize, Error> {
+    fn write(&mut self, _badge: Badge, _offset: u64, _buf: &[u8]) -> Result<usize, Error> {
         // Read-only for now
         Ok(0)
     }
 
-    fn close(&mut self) -> Result<(), Error> {
+    fn close(&mut self, _badge: Badge) -> Result<(), Error> {
         Ok(())
     }
 
-    fn stat(&self) -> Result<Stat, Error> {
+    fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
         let mut stat = Stat::default();
         stat.size = self.size;
         stat.mode = 0o100644;
         Ok(stat)
     }
 
-    fn getdents(&mut self, _count: usize) -> Result<Vec<DEntry>, Error> {
+    fn getdents(&mut self, _badge: Badge, _count: usize) -> Result<Vec<DEntry>, Error> {
         Err(Error::NotImplemented)
     }
 
-    fn seek(&mut self, _offset: i64, _whence: usize) -> Result<u64, Error> {
+    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<u64, Error> {
         Err(Error::NotImplemented)
     }
 
-    fn sync(&mut self) -> Result<(), Error> {
+    fn sync(&mut self, _badge: Badge) -> Result<(), Error> {
         Ok(())
     }
 
-    fn truncate(&mut self, _size: u64) -> Result<(), Error> {
+    fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
         Err(Error::NotImplemented)
     }
 
     fn setup_iouring(
         &mut self,
+        _badge: Badge,
         server_vaddr: usize,
         client_vaddr: usize,
         size: usize,
@@ -539,7 +540,7 @@ impl FileHandleService for FatFileHandle {
         Ok(())
     }
 
-    fn process_iouring(&mut self) -> Result<(), Error> {
+    fn process_iouring(&mut self, _badge: Badge) -> Result<(), Error> {
         if let Some(ring) = self.uring.take() {
             while let Some(sqe) = ring.pop_sqe() {
                 use glenda::io::uring::{IoUringCqe, IOURING_OP_READ};

@@ -84,6 +84,7 @@ impl SystemService for FatFsService {
     }
 
     fn dispatch(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
+        let badge = utcb.get_badge();
         glenda::ipc_dispatch! {
             self, utcb,
             (FS_PROTO, protocol::fs::OPEN) => |s: &mut Self, u: &mut UTCB| {
@@ -136,7 +137,7 @@ impl SystemService for FatFsService {
                     let handle = s.handles.get_mut(&id).ok_or(Error::NotFound)?;
 
                     let mut buf = alloc::vec![0u8; len];
-                    let read_len = handle.read(offset, &mut buf)?;
+                    let read_len = handle.read(badge, offset, &mut buf)?;
                     u_inner.set_mr(0, read_len);
                     // TODO: copy buffer to UTCB or shared memory
                     Ok(())
