@@ -53,7 +53,7 @@ impl<'a> InitrdServer<'a> {
             reply: Reply::from(CapPtr::null()),
             recv: CapPtr::null(),
             running: false,
-            cspace: CSpaceManager::new(CSPACE_CAP, 100),
+            cspace: CSpaceManager::new(CSPACE_CAP, 16),
         }
     }
 }
