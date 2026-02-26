@@ -2,38 +2,34 @@ use glenda::cap::Endpoint;
 use glenda::error::Error;
 use glenda::io::uring::IoUringClient;
 use glenda::mem::shm::SharedMemory;
-use glenda_drivers::client::block::BlockClient;
-use glenda_drivers::interface::BlockDriver;
+use glenda::client::volume::VolumeClient;
+use glenda::io::uring::RingParams;
+use glenda::mem::shm::ShmParams;
+use glenda::client::ResourceClient;
 extern crate alloc;
 
 pub struct BlockReader {
-    client: BlockClient,
+    client: VolumeClient,
 }
 
 impl BlockReader {
-    pub fn new(endpoint: Endpoint) -> Self {
-        Self { client: BlockClient::new(endpoint) }
+    pub fn new(
+        endpoint: Endpoint,
+        res_client: &mut ResourceClient,
+        ring_params: RingParams,
+        shm_params: ShmParams,
+    ) -> Self {
+        Self {
+            client: VolumeClient::new(endpoint, res_client, ring_params, shm_params),
+        }
     }
 
     pub fn init(&mut self) -> Result<(), Error> {
-        self.client.init()
+        self.client.connect()
     }
 
-    pub fn setup_ring(
-        &mut self,
-        sq_entries: u32,
-        cq_entries: u32,
-        notify_ep: Endpoint,
-        recv: glenda::cap::CapPtr,
-    ) -> Result<glenda::cap::Frame, Error> {
-        self.client.setup_ring(sq_entries, cq_entries, notify_ep, recv)
-    }
-
-    pub fn request_shm(
-        &self,
-        recv: glenda::cap::CapPtr,
-    ) -> Result<(glenda::cap::Frame, usize, usize, usize), Error> {
-        self.client.request_shm(recv)
+    pub fn endpoint(&self) -> Endpoint {
+        self.client.endpoint()
     }
 
     pub fn set_shm(&mut self, shm: SharedMemory) {
@@ -42,10 +38,6 @@ impl BlockReader {
 
     pub fn set_ring(&mut self, ring: IoUringClient) {
         self.client.set_ring(ring);
-    }
-
-    pub fn endpoint(&self) -> Endpoint {
-        self.client.endpoint()
     }
 
     pub fn read_offset(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
@@ -110,6 +102,6 @@ impl BlockReader {
 
 impl Clone for BlockReader {
     fn clone(&self) -> Self {
-        Self { client: BlockClient::new(self.client.endpoint()) }
+        Self { client: self.client.clone() }
     }
 }

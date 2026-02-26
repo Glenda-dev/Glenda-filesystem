@@ -1,31 +1,29 @@
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use glenda::cap::{CapPtr, Endpoint, Frame, Reply, CSPACE_CAP, RECV_SLOT};
+use glenda::client::volume::VolumeClient;
 use glenda::client::{FsClient, ResourceClient};
 use glenda::error::Error;
-use glenda::interface::fs::FileHandleService;
+use glenda::interface::memory::MemoryService;
 use glenda::interface::system::SystemService;
-use glenda::interface::{MemoryService, VirtualFileSystemService};
-use glenda::io::uring::{IoUringBuffer, IoUringClient};
+use glenda::interface::VirtualFileSystemService;
+use glenda::io::uring::RingParams;
 use glenda::ipc::server::handle_call;
 use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
-use glenda::mem::shm::SharedMemory;
+use glenda::mem::shm::ShmParams;
 use glenda::protocol;
 use glenda::protocol::fs::OpenFlags;
 use glenda::utils::manager::{CSpaceManager, CSpaceService};
-use glenda_drivers::client::block::BlockClient;
-use glenda_drivers::interface::BlockDriver;
 
-use crate::fs::{InitrdEntry, InitrdFS};
+use crate::fs::InitrdFS;
 use crate::layout::{RING_SLOT, SHM_SLOT};
 
 pub struct InitrdServer<'a> {
-    blk_client: &'a mut BlockClient,
+    blk_client: Option<VolumeClient>,
+    dev_ep: Endpoint,
     res_client: &'a mut ResourceClient,
     vfs_client: &'a mut FsClient,
     fs: Option<InitrdFS>,
-    open_files: BTreeMap<usize, Box<dyn FileHandleService + Send>>,
+    open_files: BTreeMap<usize, crate::fs::InitrdFile>,
     next_badge: usize,
     next_vaddr: usize,
     endpoint: Endpoint,
@@ -37,12 +35,13 @@ pub struct InitrdServer<'a> {
 
 impl<'a> InitrdServer<'a> {
     pub fn new(
-        blk_client: &'a mut BlockClient,
+        dev_ep: Endpoint,
         res_client: &'a mut ResourceClient,
         vfs_client: &'a mut FsClient,
     ) -> Self {
         Self {
-            blk_client,
+            blk_client: None,
+            dev_ep,
             res_client,
             vfs_client,
             fs: None,
@@ -60,90 +59,47 @@ impl<'a> InitrdServer<'a> {
 
 impl<'a> SystemService for InitrdServer<'a> {
     fn init(&mut self) -> Result<(), Error> {
-        self.blk_client.init()?;
-
-        // Use request_shm to let Fossil allocate and manage the buffer.
+        // We use VolumeClient to let Fossil allocate and manage the buffer.
         // This ensures the buffer is correctly registered with Fossil/Drivers for zero-copy.
-        // We use RECV_SLOT to receive the frame cap.
-        let (shm, vaddr_fossil, size, paddr) = self.blk_client.request_shm(SHM_SLOT)?;
 
-        // We still need to map it into our address space to access it
-        let shm_vaddr = self.next_vaddr;
-        self.next_vaddr += size; // Use actual size returned by Fossil
-        self.res_client.mmap(Badge::null(), shm, shm_vaddr, size)?;
-        // Setup local objects
-        // Create SharedMemory with paddr aware
-        let mut shm = SharedMemory::new(shm, shm_vaddr, size);
-        shm.set_paddr(paddr as u64); // Important!
-        shm.set_client_vaddr(vaddr_fossil); // Set the address Fossil expects (client_vaddr from its perspective)
-
-        log!("Mapped SHM into our address space at {:#x}", shm_vaddr);
-
-        // Now setup the ring.
-        // This makes Fossil/Driver allocate ring memory and return it in RECV_SLOT.
-        // Use 16 entries to ensure it fits within 1 page (4096 bytes).
-        let ring = self.blk_client.setup_ring(16, 16, self.endpoint, RING_SLOT)?;
-        let ring_size = 4096; // 1 page is enough for 16 entries
         let ring_vaddr = self.next_vaddr;
-        self.next_vaddr += ring_size;
-        self.res_client.mmap(Badge::null(), ring, ring_vaddr, ring_size)?;
+        self.next_vaddr += 4096;
+        let shm_vaddr = self.next_vaddr;
 
-        let ring_buf = unsafe { IoUringBuffer::attach(ring_vaddr as *mut u8, ring_size) };
-        let ring = IoUringClient::new(ring_buf);
+        let ring_params = RingParams {
+            sq_entries: 16,
+            cq_entries: 16,
+            notify_ep: self.endpoint,
+            recv_slot: RING_SLOT,
+            vaddr: ring_vaddr,
+            size: 4096,
+        };
+        let shm_params = ShmParams {
+            frame: Frame::from(CapPtr::null()),
+            vaddr: shm_vaddr,
+            paddr: 0,
+            size: 0,
+            recv_slot: SHM_SLOT,
+        };
 
-        self.blk_client.set_shm(shm);
-        self.blk_client.set_ring(ring);
-        log!("Mapped ring buffer into our address space at {:#x}", ring_vaddr);
+        let mut blk_client =
+            VolumeClient::new(self.dev_ep, self.res_client, ring_params, shm_params);
+        blk_client.connect()?;
+
+        self.blk_client = Some(blk_client);
+
+        log!(
+            "Connected to block device and initialized ring: {:#x}, shm: {:#x}",
+            ring_vaddr,
+            shm_vaddr
+        );
 
         // Read the Initrd header (sector 0)
         let mut header_buf = [0u8; 4096];
-        self.blk_client.read_at(0, 4096, &mut header_buf)?;
+        self.blk_client.as_ref().unwrap().read_at(0, 4096, &mut header_buf)?;
         log!("Header read complete");
 
-        let magic =
-            u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
-        log!("Magic = {:08x}", magic);
-        if magic != 0x99999999 {
-            error!("Invalid initrd header magic: {:08x}", magic);
-            return Err(Error::InvalidArgs);
-        }
-
-        let count = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]])
-            as usize;
-        log!("File count = {}", count);
-        let mut entries = Vec::with_capacity(count);
-
-        let entry_base = 16;
-        let entry_size = 48;
-        for i in 0..count {
-            let offset = entry_base + i * entry_size;
-            let type_byte = header_buf[offset];
-            let file_offset = u32::from_le_bytes([
-                header_buf[offset + 1],
-                header_buf[offset + 2],
-                header_buf[offset + 3],
-                header_buf[offset + 4],
-            ]) as u64;
-            let file_size = u32::from_le_bytes([
-                header_buf[offset + 5],
-                header_buf[offset + 6],
-                header_buf[offset + 7],
-                header_buf[offset + 8],
-            ]) as u64;
-
-            let name_bytes = &header_buf[offset + 9..offset + 9 + 32];
-            let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(32);
-            let name = core::str::from_utf8(&name_bytes[..name_len]).unwrap_or("unknown");
-
-            entries.push(InitrdEntry {
-                _type: type_byte,
-                name: alloc::string::String::from(name),
-                offset: file_offset,
-                size: file_size,
-            });
-        }
-
-        self.fs = Some(InitrdFS::new(self.blk_client.endpoint(), entries, ring_vaddr, ring_size));
+        self.fs = Some(InitrdFS::new(header_buf));
         Ok(())
     }
 
@@ -212,8 +168,7 @@ impl<'a> SystemService for InitrdServer<'a> {
             },
             (protocol::FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
-                    if let Some(mut handle) = s.open_files.remove(&badge_bits) {
-                        handle.close(badge)?;
+                    if let Some(_handle) = s.open_files.remove(&badge_bits) {
                         Ok(())
                     } else {
                         Err(Error::InvalidArgs)
@@ -230,6 +185,7 @@ impl<'a> SystemService for InitrdServer<'a> {
             },
             (protocol::FS_PROTO, protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
+                    let blk_client = s.blk_client.as_ref().ok_or(Error::NotInitialized)?;
                     let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
                     let len = u_inner.get_mr(0);
                     let offset = u_inner.get_mr(1) as u64;
@@ -237,12 +193,13 @@ impl<'a> SystemService for InitrdServer<'a> {
                     if len > buf.len() {
                         return Err(Error::InvalidArgs);
                     }
-                    let read_len = handle.read(badge, offset, &mut buf[..len])?;
+                    let read_len = handle.read(blk_client, badge, offset, &mut buf[..len])?;
                     Ok(read_len)
                 })
             },
             (protocol::FS_PROTO, protocol::fs::SETUP_IOURING) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
+                    let blk_client = s.blk_client.as_mut().ok_or(Error::NotInitialized)?;
                     let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
                     let addr_user = u_inner.get_mr(1);
                     let size = u_inner.get_mr(2);
@@ -262,14 +219,15 @@ impl<'a> SystemService for InitrdServer<'a> {
                         s.res_client.mmap(Badge::null(), f, addr_server, size)?;
                     }
 
-                    handle.setup_iouring(badge, addr_server, addr_user, size, frame)?;
+                    handle.setup_iouring(blk_client, badge, addr_server, addr_user, size, frame)?;
                     Ok(())
                 })
             },
             (protocol::FS_PROTO, protocol::fs::PROCESS_IOURING) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
+                    let blk_client = s.blk_client.as_ref().ok_or(Error::NotInitialized)?;
                     let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
-                    handle.process_iouring(badge)?;
+                    handle.process_iouring(blk_client, badge)?;
                     Ok(())
                 })
             }

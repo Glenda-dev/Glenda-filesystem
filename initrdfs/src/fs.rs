@@ -1,13 +1,11 @@
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use glenda::cap::{Endpoint, Frame};
+use glenda::cap::Frame;
 use glenda::error::Error;
-use glenda::interface::fs::FileHandleService;
 use glenda::io::uring::IoUringBuffer;
 use glenda::ipc::Badge;
-use glenda::protocol::fs::{DEntry, OpenFlags, Stat};
-use glenda_drivers::client::block::BlockClient;
+use glenda::protocol::fs::{OpenFlags, Stat};
+use glenda::client::volume::VolumeClient;
 
 pub const DEFAULT_STAT: u32 = 0o100444;
 
@@ -21,16 +19,25 @@ pub struct InitrdEntry {
 
 // Represents an open file in Initrd
 pub struct InitrdFile {
-    offset: u64,
-    size: u64,
-    blk_client: BlockClient,
-    uring: Option<IoUringBuffer>,
-    user_shm_base: usize,
-    server_shm_base: usize,
+    pub offset: u64,
+    pub size: u64,
+    pub uring: Option<IoUringBuffer>,
+    pub user_shm_base: usize,
+    pub server_shm_base: usize,
 }
 
-impl FileHandleService for InitrdFile {
-    fn read(&mut self, _badge: Badge, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+impl InitrdFile {
+    pub fn new(offset: u64, size: u64) -> Self {
+        Self { offset, size, uring: None, user_shm_base: 0, server_shm_base: 0 }
+    }
+
+    pub fn read(
+        &mut self,
+        blk_client: &VolumeClient,
+        _badge: Badge,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
         if offset >= self.size {
             return Ok(0);
         }
@@ -46,54 +53,24 @@ impl FileHandleService for InitrdFile {
         let block_count = end_block - start_block;
         let read_size = block_count * block_size;
 
-        // Allocate temporary buffer for block-aligned read
-        // Since we don't have a large buffer, we process block by block or in chunks
-        // But BlockClient uses SHM for transfer. We can just read 4KB (or more) into SHM
-        // and copy out what we need.
-        // However, read_at copies from SHM to OUR buffer. our buffer is `read_len` size.
-        // We need a temp buffer of size `read_size`.
-        // Allocating large buffer on stack is bad. Heap allocation (Vec) is OK in userspace.
-
         let mut temp_buf = alloc::vec![0u8; read_size as usize];
 
-        self.blk_client.read_at(start_block * block_size, read_size as u32, &mut temp_buf)?;
+        blk_client.read_at(start_block * block_size, read_size as u32, &mut temp_buf)?;
 
         let copy_start = (start_pos % block_size) as usize;
-        buf[..read_len].copy_from_slice(&temp_buf[copy_start..copy_start + read_len]);
+        let actual_read = core::cmp::min(read_len, buf.len());
+        buf[..actual_read].copy_from_slice(&temp_buf[copy_start..copy_start + actual_read]);
 
-        Ok(read_len)
+        Ok(actual_read)
     }
 
-    fn write(&mut self, _badge: Badge, _offset: u64, _buf: &[u8]) -> Result<usize, Error> {
-        Err(Error::PermissionDenied)
-    }
-
-    fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
+    pub fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
         Ok(Stat { size: self.size, mode: DEFAULT_STAT, ..Default::default() })
     }
 
-    fn getdents(&mut self, _badge: Badge, _count: usize) -> Result<Vec<DEntry>, Error> {
-        Err(Error::NotImplemented)
-    }
-
-    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<u64, Error> {
-        Err(Error::NotImplemented)
-    }
-
-    fn sync(&mut self, _badge: Badge) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
-        Err(Error::PermissionDenied)
-    }
-
-    fn close(&mut self, _badge: Badge) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn setup_iouring(
+    pub fn setup_iouring(
         &mut self,
+        blk_client: &mut VolumeClient,
         _badge: Badge,
         server_vaddr: usize,
         user_vaddr: usize,
@@ -105,12 +82,16 @@ impl FileHandleService for InitrdFile {
         self.uring = Some(unsafe { IoUringBuffer::attach(server_vaddr as *mut u8, size) });
         if let Some(f) = frame {
             let shm = glenda::mem::shm::SharedMemory::new(f, server_vaddr, size);
-            self.blk_client.set_shm(shm);
+            blk_client.set_shm(shm);
         }
         Ok(())
     }
 
-    fn process_iouring(&mut self, _badge: Badge) -> Result<(), Error> {
+    pub fn process_iouring(
+        &mut self,
+        blk_client: &VolumeClient,
+        _badge: Badge,
+    ) -> Result<(), Error> {
         if let Some(ring) = self.uring.take() {
             while let Some(sqe) = ring.pop_sqe() {
                 use glenda::io::uring::{IoUringCqe, IOURING_OP_READ};
@@ -125,7 +106,7 @@ impl FileHandleService for InitrdFile {
                             -(Error::InvalidArgs as i32)
                         } else {
                             let server_addr = addr - self.user_shm_base + self.server_shm_base;
-                            match self.blk_client.read_shm(self.offset + offset, len, server_addr) {
+                            match blk_client.read_shm(self.offset + offset, len, server_addr) {
                                 Ok(_) => len as i32,
                                 Err(e) => -(e as i32),
                             }
@@ -144,20 +125,52 @@ impl FileHandleService for InitrdFile {
 }
 
 pub struct InitrdFS {
-    blk_ep: Endpoint,
     entries: Vec<InitrdEntry>,
-    ring_vaddr: usize,
-    ring_size: usize,
 }
 
 impl InitrdFS {
-    pub fn new(
-        blk_ep: Endpoint,
-        entries: Vec<InitrdEntry>,
-        ring_vaddr: usize,
-        ring_size: usize,
-    ) -> Self {
-        Self { blk_ep, entries, ring_vaddr, ring_size }
+    pub fn new(header_buf: [u8; 4096]) -> Self {
+        let magic =
+            u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
+        if magic != 0x99999999 {
+            // This should have been checked earlier but let's be safe
+        }
+
+        let count = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]])
+            as usize;
+        let mut entries = Vec::with_capacity(count);
+
+        let entry_base = 16;
+        let entry_size = 48;
+        for i in 0..count {
+            let offset = entry_base + i * entry_size;
+            let type_byte = header_buf[offset];
+            let file_offset = u32::from_le_bytes([
+                header_buf[offset + 1],
+                header_buf[offset + 2],
+                header_buf[offset + 3],
+                header_buf[offset + 4],
+            ]) as u64;
+            let file_size = u32::from_le_bytes([
+                header_buf[offset + 5],
+                header_buf[offset + 6],
+                header_buf[offset + 7],
+                header_buf[offset + 8],
+            ]) as u64;
+
+            let mut name_buf = [0u8; 32];
+            name_buf.copy_from_slice(&header_buf[offset + 16..offset + 48]);
+            let name_len = name_buf.iter().position(|&b| b == 0).unwrap_or(32);
+            let name = core::str::from_utf8(&name_buf[..name_len]).unwrap_or("unknown");
+
+            entries.push(InitrdEntry {
+                _type: type_byte,
+                name: alloc::string::String::from(name),
+                offset: file_offset,
+                size: file_size,
+            });
+        }
+        Self { entries }
     }
 
     pub fn open_handle(
@@ -165,33 +178,26 @@ impl InitrdFS {
         path: &str,
         _flags: OpenFlags,
         _mode: u32,
-    ) -> Result<Box<dyn FileHandleService + Send>, Error> {
-        let entry = self.entries.iter().find(|e| e.name == path).ok_or(Error::NotFound)?;
-
-        let mut blk_client = BlockClient::new(self.blk_ep);
-        blk_client.init()?;
-
-        if self.ring_vaddr != 0 {
-            let ring_buf =
-                unsafe { IoUringBuffer::attach(self.ring_vaddr as *mut u8, self.ring_size) };
-            blk_client.set_ring(glenda::io::uring::IoUringClient::new(ring_buf));
+    ) -> Result<InitrdFile, Error> {
+        let clean_path = path.trim_start_matches('/');
+        for entry in &self.entries {
+            if entry.name == clean_path {
+                return Ok(InitrdFile::new(entry.offset, entry.size));
+            }
         }
-
-        Ok(Box::new(InitrdFile {
-            offset: entry.offset,
-            size: entry.size,
-            blk_client,
-            uring: None,
-            user_shm_base: 0,
-            server_shm_base: 0,
-        }))
+        Err(Error::NotFound)
     }
 
-    pub fn stat(&mut self, path: &str) -> Result<Stat, Error> {
-        if let Some(entry) = self.entries.iter().find(|e| e.name == path) {
-            Ok(Stat { size: entry.size, mode: DEFAULT_STAT, ..Default::default() })
-        } else {
-            Err(Error::NotFound)
+    pub fn stat(&self, path: &str) -> Result<Stat, Error> {
+        let clean_path = path.trim_start_matches('/');
+        if clean_path.is_empty() {
+            return Ok(Stat { size: 0, mode: 0o040555, ..Default::default() });
         }
+        for entry in &self.entries {
+            if entry.name == clean_path {
+                return Ok(Stat { size: entry.size, mode: DEFAULT_STAT, ..Default::default() });
+            }
+        }
+        Err(Error::NotFound)
     }
 }

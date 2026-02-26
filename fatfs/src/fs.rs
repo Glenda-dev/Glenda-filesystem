@@ -1,5 +1,6 @@
 use crate::block::BlockReader;
 use crate::defs::*;
+use crate::layout::{NOTIFY_SLOT, RECV_BUFFER_SLOT, RECV_RING_SLOT};
 use crate::ops::{FatOps, RootLocation};
 use crate::versions::Fat16Ops;
 use crate::versions::Fat32Ops;
@@ -7,13 +8,14 @@ use crate::versions::{ExFatBpb, ExFatOps};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use glenda::cap::Endpoint;
+use glenda::cap::{Endpoint, Frame};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
-use glenda::interface::{MemoryService, ResourceService};
+use glenda::interface::ResourceService;
+use glenda::io::uring::RingParams;
 use glenda::ipc::Badge;
-use glenda::mem::shm::SharedMemory;
+use glenda::mem::shm::ShmParams;
 use glenda::protocol::fs::{DEntry, OpenFlags, Stat};
 
 pub struct FatFs {
@@ -30,38 +32,35 @@ impl FatFs {
         ring_size: usize,
         res_client: &mut ResourceClient,
     ) -> Result<Self, Error> {
-        let mut reader = BlockReader::new(block_device);
-        reader.init()?;
-
-        // Setup IoUring (similar to ExtFS)
+        // 1. Setup IoUring Params
         let sq_entries = 4;
         let cq_entries = 4;
-        let notify_slot = glenda::cap::CapPtr::from(0x50);
+        let notify_slot = NOTIFY_SLOT;
         res_client.alloc(Badge::null(), glenda::cap::CapType::Endpoint, 0, notify_slot)?;
         let notify_ep = glenda::cap::Endpoint::from(notify_slot);
+        let recv_ring_slot = RECV_RING_SLOT;
+        let recv_buffer_slot = RECV_BUFFER_SLOT;
 
-        let recv_ring_slot = glenda::cap::CapPtr::from(0x51);
-        let frame = reader.setup_ring(sq_entries, cq_entries, notify_ep, recv_ring_slot)?;
-        res_client.mmap(Badge::null(), frame, ring_vaddr, ring_size)?;
-
-        let ring = unsafe {
-            glenda::io::uring::IoUringClient::new(glenda::io::uring::IoUringBuffer::new(
-                ring_vaddr as *mut u8,
-                ring_size,
-                sq_entries,
-                cq_entries,
-            ))
+        let ring_params = RingParams {
+            sq_entries,
+            cq_entries,
+            vaddr: ring_vaddr,
+            size: ring_size,
+            notify_ep,
+            recv_slot: recv_ring_slot,
         };
-        reader.set_ring(ring);
 
-        // Request Buffer
-        let recv_buffer_slot = glenda::cap::CapPtr::from(0x52);
-        let (frame, fossil_vaddr, size, paddr) = reader.request_shm(recv_buffer_slot)?;
-        res_client.mmap(Badge::null(), frame.clone(), fossil_vaddr, size)?;
+        let shm_params = ShmParams {
+            frame: Frame::from(glenda::cap::CapPtr::null()),
+            vaddr: 0,
+            size: 0,
+            paddr: 0,
+            recv_slot: recv_buffer_slot,
+        };
 
-        let mut shm = SharedMemory::new(frame, fossil_vaddr, size);
-        shm.set_paddr(paddr as u64);
-        reader.set_shm(shm);
+        // 2. Create reader and init (VolumeClient handles the handshake internally)
+        let mut reader = BlockReader::new(block_device, res_client, ring_params, shm_params);
+        reader.init()?;
 
         // Read BPB
         let mut buf = [0u8; 512];
@@ -517,58 +516,5 @@ impl FileHandleService for FatFileHandle {
 
     fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
         Err(Error::NotImplemented)
-    }
-
-    fn setup_iouring(
-        &mut self,
-        _badge: Badge,
-        server_vaddr: usize,
-        client_vaddr: usize,
-        size: usize,
-        frame: Option<glenda::cap::Frame>,
-    ) -> Result<(), Error> {
-        self.server_shm_base = server_vaddr;
-        self.user_shm_base = client_vaddr;
-        self.uring = Some(unsafe {
-            glenda::io::uring::IoUringBuffer::attach(server_vaddr as *mut u8, size)
-        });
-
-        if let Some(f) = frame {
-            let shm = glenda::mem::shm::SharedMemory::new(f, server_vaddr, size);
-            self.reader.set_shm(shm);
-        }
-        Ok(())
-    }
-
-    fn process_iouring(&mut self, _badge: Badge) -> Result<(), Error> {
-        if let Some(ring) = self.uring.take() {
-            while let Some(sqe) = ring.pop_sqe() {
-                use glenda::io::uring::{IoUringCqe, IOURING_OP_READ};
-
-                let res = match sqe.opcode {
-                    IOURING_OP_READ => {
-                        let addr = sqe.addr as usize;
-                        let len = sqe.len as u32;
-                        let offset = sqe.off as u64;
-
-                        if addr < self.user_shm_base {
-                            -(Error::InvalidArgs as i32)
-                        } else {
-                            let server_addr = addr - self.user_shm_base + self.server_shm_base;
-                            match self.read_shm_internal(offset, len, server_addr) {
-                                Ok(n) => n as i32,
-                                Err(e) => -(e as i32),
-                            }
-                        }
-                    }
-                    _ => -(Error::NotSupported as i32),
-                };
-
-                let cqe = IoUringCqe { user_data: sqe.user_data, res, flags: 0 };
-                ring.push_cqe(cqe).ok();
-            }
-            self.uring = Some(ring);
-        }
-        Ok(())
     }
 }

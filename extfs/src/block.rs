@@ -1,33 +1,30 @@
 extern crate alloc;
 
 use glenda::cap::Endpoint;
+use glenda::client::volume::VolumeClient;
+use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::io::uring::IoUringClient;
+use glenda::io::uring::RingParams;
 use glenda::mem::shm::SharedMemory;
-use glenda_drivers::client::block::BlockClient;
-use glenda_drivers::interface::BlockDriver;
+use glenda::mem::shm::ShmParams;
 
 pub struct BlockReader {
-    client: BlockClient,
+    client: VolumeClient,
 }
 
 impl BlockReader {
-    pub fn new(endpoint: Endpoint) -> Self {
-        Self { client: BlockClient::new(endpoint) }
+    pub fn new(
+        endpoint: Endpoint,
+        res_client: &mut ResourceClient,
+        ring_params: RingParams,
+        shm_params: ShmParams,
+    ) -> Self {
+        Self { client: VolumeClient::new(endpoint, res_client, ring_params, shm_params) }
     }
 
     pub fn init(&mut self) -> Result<(), Error> {
-        self.client.init()
-    }
-
-    pub fn setup_ring(
-        &mut self,
-        sq_entries: u32,
-        cq_entries: u32,
-        notify_ep: Endpoint,
-        recv: glenda::cap::CapPtr,
-    ) -> Result<glenda::cap::Frame, Error> {
-        self.client.setup_ring(sq_entries, cq_entries, notify_ep, recv)
+        self.client.connect()
     }
 
     pub fn set_shm(&mut self, shm: SharedMemory) {
@@ -71,13 +68,6 @@ impl BlockReader {
 
     pub fn read_shm(&self, offset: u64, len: u32, shm_vaddr: usize) -> Result<(), Error> {
         self.client.read_shm(offset, len, shm_vaddr)
-    }
-
-    pub fn request_shm(
-        &self,
-        recv: glenda::cap::CapPtr,
-    ) -> Result<(glenda::cap::Frame, usize, usize, usize), Error> {
-        self.client.request_shm(recv)
     }
 
     pub fn write_blocks(&self, sector: u64, buf: &[u8]) -> Result<(), Error> {
@@ -124,6 +114,6 @@ impl BlockReader {
 
 impl Clone for BlockReader {
     fn clone(&self) -> Self {
-        Self { client: BlockClient::new(self.client.endpoint()) }
+        Self { client: self.client.clone() }
     }
 }

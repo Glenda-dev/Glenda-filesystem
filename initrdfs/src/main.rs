@@ -9,10 +9,9 @@ extern crate alloc;
 use glenda::cap::{CapPtr, CapType, Endpoint, ENDPOINT_CAP, ENDPOINT_SLOT, MONITOR_CAP, REPLY_CAP};
 use glenda::client::{FsClient, ResourceClient, VolumeClient};
 use glenda::interface::system::SystemService;
-use glenda::interface::{ResourceService, VolumeService};
+use glenda::interface::{ResourceService};
 use glenda::ipc::Badge;
 use glenda::protocol::resource::{FS_ENDPOINT, VOLUME_ENDPOINT};
-use glenda_drivers::client::block::BlockClient;
 
 mod fs;
 mod layout;
@@ -37,7 +36,7 @@ fn main() -> usize {
             VOLUME_SLOT,
         )
         .expect("Failed to get volume endpoint");
-    let mut vol_client = VolumeClient::new(Endpoint::from(vol_cap));
+    let vol_client = VolumeClient::new_simple(Endpoint::from(vol_cap), &mut res_client);
 
     // Retrieve the specific block device endpoint badged for this driver
     let dev_cap =
@@ -58,9 +57,7 @@ fn main() -> usize {
         .expect("Failed to get VFS endpoint");
     let mut vfs_client = FsClient::new(Endpoint::from(vfs_cap));
 
-    let mut blk_client = BlockClient::new(dev_cap);
-
-    let mut server = server::InitrdServer::new(&mut blk_client, &mut res_client, &mut vfs_client);
+    let mut server = server::InitrdServer::new(dev_cap, &mut res_client, &mut vfs_client);
 
     if let Err(e) = server.listen(ENDPOINT_CAP, REPLY_CAP.cap(), CapPtr::null()) {
         log!("Failed to listen: {:?}", e);
