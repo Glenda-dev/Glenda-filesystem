@@ -48,14 +48,14 @@ impl InitrdFile {
         let start_pos = self.offset + offset;
         let end_pos = start_pos + read_len as u64;
 
-        let start_block = start_pos / block_size;
-        let end_block = (end_pos + block_size - 1) / block_size;
-        let block_count = end_block - start_block;
-        let read_size = block_count * block_size;
+        let start_sector = start_pos / block_size;
+        let end_sector = (end_pos + block_size - 1) / block_size;
+        let sector_count = end_sector - start_sector;
+        let read_size = sector_count * block_size;
 
         let mut temp_buf = alloc::vec![0u8; read_size as usize];
 
-        blk_client.read_at(start_block * block_size, read_size as u32, &mut temp_buf)?;
+        blk_client.read_at(start_sector, read_size as u32, &mut temp_buf)?;
 
         let copy_start = (start_pos % block_size) as usize;
         let actual_read = core::cmp::min(read_len, buf.len());
@@ -106,7 +106,9 @@ impl InitrdFile {
                             -(Error::InvalidArgs as i32)
                         } else {
                             let server_addr = addr - self.user_shm_base + self.server_shm_base;
-                            match blk_client.read_shm(self.offset + offset, len, server_addr) {
+                            let start_pos = self.offset + offset;
+                            let start_sector = start_pos / 4096;
+                            match blk_client.read_shm(start_sector, len, server_addr) {
                                 Ok(_) => len as i32,
                                 Err(e) => -(e as i32),
                             }

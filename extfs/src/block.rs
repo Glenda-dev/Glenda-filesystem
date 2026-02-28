@@ -49,17 +49,17 @@ impl BlockReader {
         let start_pos = offset;
         let end_pos = start_pos + buf.len() as u64;
 
-        let start_block = start_pos / block_size;
-        let end_block = (end_pos + block_size - 1) / block_size;
-        let block_count = end_block - start_block;
-        let read_size = block_count * block_size;
+        let start_sector = start_pos / block_size;
+        let end_sector = (end_pos + block_size - 1) / block_size;
+        let sector_count = end_sector - start_sector;
+        let read_size = sector_count * block_size;
 
         if start_pos % block_size == 0 && buf.len() as u64 == read_size {
-            self.client.read_at(offset, buf.len() as u32, buf)?;
+            self.client.read_at(start_sector, buf.len() as u32, buf)?;
         } else {
             let mut temp_buf = alloc::vec::Vec::new();
             temp_buf.resize(read_size as usize, 0u8);
-            self.client.read_at(start_block * block_size, read_size as u32, &mut temp_buf)?;
+            self.client.read_at(start_sector, read_size as u32, &mut temp_buf)?;
             let copy_start = (start_pos % block_size) as usize;
             buf.copy_from_slice(&temp_buf[copy_start..copy_start + buf.len()]);
         }
@@ -71,43 +71,24 @@ impl BlockReader {
     }
 
     pub fn write_blocks(&self, sector: u64, buf: &[u8]) -> Result<(), Error> {
-        // Assume 'sector' refers to filesystem blocks which might differ from device block size?
-        // Actually, if this method is called 'write_blocks', it probably comes from a trait or common pattern.
-        // If it means 'write device blocks', then offset calculation using client.block_size() is correct IF sector refers to device blocks.
-        // But if we want to support unaligned writes (e.g. 512 byte sectors on 4KB device), we need RMW.
-
         let dev_block_size: u64 = 4096;
-        // If the caller assumes 512-byte sectors (standard LBA), but device is 4KB
-        // We should treat 'sector' as 512-byte LBA?
-        // Most filesystems (like FAT) use 512-byte sectors at the bottom layer.
-        // ExtFS usually uses 1KB-4KB blocks.
-
-        // Let's assume 'sector' here means 512-byte sector for compatibility with typical 'write_blocks' semantics,
-        // UNLESS this function is only used with FS-block-index.
-
-        // Given fatfs/src/block.rs used sector * 512, let's assume standard LBA (512 bytes).
-        let offset = sector * 512;
-
-        let start_pos = offset;
+        let start_pos = sector * 512;
         let end_pos = start_pos + buf.len() as u64;
 
-        let start_block = start_pos / dev_block_size;
-        let end_block = (end_pos + dev_block_size - 1) / dev_block_size;
-        let block_count = end_block - start_block;
-        let read_size = block_count * dev_block_size;
+        let start_sector = start_pos / dev_block_size;
+        let end_sector = (end_pos + dev_block_size - 1) / dev_block_size;
+        let sector_count = end_sector - start_sector;
+        let read_size = sector_count * dev_block_size;
 
         if start_pos % dev_block_size == 0 && buf.len() as u64 == read_size {
-            self.client.write_at(start_pos, buf.len() as u32, buf)
+            self.client.write_at(start_sector, buf.len() as u32, buf)
         } else {
-            // Read-Modify-Write
             let mut temp_buf = alloc::vec::Vec::new();
             temp_buf.resize(read_size as usize, 0u8);
-            self.client.read_at(start_block * dev_block_size, read_size as u32, &mut temp_buf)?;
-
+            self.client.read_at(start_sector, read_size as u32, &mut temp_buf)?;
             let copy_start = (start_pos % dev_block_size) as usize;
             temp_buf[copy_start..copy_start + buf.len()].copy_from_slice(buf);
-
-            self.client.write_at(start_block * dev_block_size, read_size as u32, &temp_buf)
+            self.client.write_at(start_sector, read_size as u32, &temp_buf)
         }
     }
 }

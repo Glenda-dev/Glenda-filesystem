@@ -49,18 +49,18 @@ impl BlockReader {
         let start_pos = offset;
         let end_pos = start_pos + buf.len() as u64;
 
-        let start_block = start_pos / block_size;
-        let end_block = (end_pos + block_size - 1) / block_size;
-        let block_count = end_block - start_block;
-        let read_size = block_count * block_size;
+        let start_sector = start_pos / block_size;
+        let end_sector = (end_pos + block_size - 1) / block_size;
+        let sector_count = end_sector - start_sector;
+        let read_size = sector_count * block_size;
 
         // Perform aligned read using temporary buffer if necessary
         if start_pos % block_size == 0 && buf.len() as u64 == read_size {
-            self.client.read_at(offset, buf.len() as u32, buf)?;
+            self.client.read_at(start_sector, buf.len() as u32, buf)?;
         } else {
             let mut temp_buf = alloc::vec::Vec::new();
             temp_buf.resize(read_size as usize, 0u8);
-            self.client.read_at(start_block * block_size, read_size as u32, &mut temp_buf)?;
+            self.client.read_at(start_sector, read_size as u32, &mut temp_buf)?;
             let copy_start = (start_pos % block_size) as usize;
             buf.copy_from_slice(&temp_buf[copy_start..copy_start + buf.len()]);
         }
@@ -76,13 +76,13 @@ impl BlockReader {
         let start_pos = sector * 512;
         let end_pos = start_pos + buf.len() as u64;
 
-        let start_block = start_pos / block_size;
-        let end_block = (end_pos + block_size - 1) / block_size;
-        let block_count = end_block - start_block;
-        let read_size = block_count * block_size;
+        let start_sector = start_pos / block_size;
+        let end_sector = (end_pos + block_size - 1) / block_size;
+        let sector_count = end_sector - start_sector;
+        let read_size = sector_count * block_size;
 
         if start_pos % block_size == 0 && buf.len() as u64 == read_size {
-            self.client.write_at(start_pos, buf.len() as u32, buf)
+            self.client.write_at(start_sector, buf.len() as u32, buf)
         } else {
             // Read-Modify-Write
             let mut temp_buf = alloc::vec::Vec::new();
@@ -90,12 +90,12 @@ impl BlockReader {
 
             // We can ignore read error if we are overwriting everything? likely not.
             // But if specific block is not initialized... For simplicity always read first.
-            self.client.read_at(start_block * block_size, read_size as u32, &mut temp_buf)?;
+            self.client.read_at(start_sector, read_size as u32, &mut temp_buf)?;
 
             let copy_start = (start_pos % block_size) as usize;
             temp_buf[copy_start..copy_start + buf.len()].copy_from_slice(buf);
 
-            self.client.write_at(start_block * block_size, read_size as u32, &temp_buf)
+            self.client.write_at(start_sector, read_size as u32, &temp_buf)
         }
     }
 }
