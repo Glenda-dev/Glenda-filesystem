@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 libglenda-rs = { path = "../../lib/libglenda-rs", features = ["rt-service"] }
-libglenda_drivers-rs = { path = "../../lib/libglenda_drivers-rs" }
 serde = { version = "1.0", default-features = false, features = [
     "derive",
     "alloc",
