@@ -7,6 +7,7 @@ extern crate alloc;
 use glenda::interface::system::SystemService;
 use glenda::interface::ResourceService;
 use glenda::ipc::Badge;
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 use layout::{DEVICE_SLOT, RING_SIZE, RING_VADDR, VOLUME_CAP, VOLUME_SLOT};
 
 mod block;
@@ -24,6 +25,9 @@ fn main() -> usize {
     glenda::console::init_logging("FatFS");
 
     let mut res_client = glenda::client::ResourceClient::new(glenda::cap::MONITOR_CAP);
+    let mut cspace = CSpaceManager::new(glenda::cap::CSPACE_CAP, 16);
+    let mut vspace = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x8000_0000);
+
     res_client
         .get_cap(
             glenda::ipc::Badge::null(),
@@ -38,7 +42,7 @@ fn main() -> usize {
         .get_device(Badge::null(), DEVICE_SLOT)
         .expect("FatFS: Failed to get block device");
 
-    let mut service = FatFsService::new(RING_VADDR, RING_SIZE);
+    let mut service = FatFsService::new(RING_VADDR, RING_SIZE, &mut cspace, &mut vspace);
     service.init_fs(block_device, &mut res_client).expect("Failed to init FatFS");
 
     service.run().expect("FatFs service crashed");

@@ -7,6 +7,7 @@ extern crate alloc;
 use glenda::interface::system::SystemService;
 use glenda::interface::ResourceService;
 use glenda::ipc::Badge;
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 mod block;
 mod defs;
@@ -24,6 +25,9 @@ fn main() -> usize {
     glenda::console::init_logging("ExtFS");
 
     let mut res_client = glenda::client::ResourceClient::new(glenda::cap::MONITOR_CAP);
+    let mut cspace = CSpaceManager::new(glenda::cap::CSPACE_CAP, 16);
+    let mut vspace = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x8000_0000);
+
     res_client
         .get_cap(
             glenda::ipc::Badge::null(),
@@ -38,7 +42,7 @@ fn main() -> usize {
         .get_device(Badge::null(), DEVICE_SLOT)
         .expect("ExtFS: Failed to get block device");
 
-    let mut service = Ext4Service::new(RING_VADDR, RING_SIZE);
+    let mut service = Ext4Service::new(RING_VADDR, RING_SIZE, &mut cspace, &mut vspace);
     service.init_fs(block_device, &mut res_client).expect("Failed to init ExtFS");
 
     service.run().expect("Ext4 service crashed");

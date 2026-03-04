@@ -12,6 +12,7 @@ use glenda::interface::system::SystemService;
 use glenda::interface::{ResourceService};
 use glenda::ipc::Badge;
 use glenda::protocol::resource::{FS_ENDPOINT, VOLUME_ENDPOINT};
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 mod fs;
 mod layout;
@@ -56,8 +57,11 @@ fn main() -> usize {
         )
         .expect("Failed to get VFS endpoint");
     let mut vfs_client = FsClient::new(Endpoint::from(vfs_cap));
+    let mut cspace_mgr = CSpaceManager::new(glenda::cap::CSPACE_CAP, 16);
+    let mut vspace_mgr = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x8000_0000);
 
-    let mut server = server::InitrdServer::new(dev_cap, &mut res_client, &mut vfs_client);
+    let mut server =
+        server::InitrdServer::new(dev_cap, &mut res_client, &mut vfs_client, &mut cspace_mgr, &mut vspace_mgr);
 
     if let Err(e) = server.listen(ENDPOINT_CAP, REPLY_CAP.cap(), CapPtr::null()) {
         log!("Failed to listen: {:?}", e);

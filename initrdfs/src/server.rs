@@ -3,7 +3,6 @@ use glenda::cap::{CapPtr, Endpoint, Frame, Reply, CSPACE_CAP, RECV_SLOT};
 use glenda::client::volume::VolumeClient;
 use glenda::client::{FsClient, ResourceClient};
 use glenda::error::Error;
-use glenda::interface::memory::MemoryService;
 use glenda::interface::system::SystemService;
 use glenda::interface::VirtualFileSystemService;
 use glenda::io::uring::RingParams;
@@ -12,7 +11,8 @@ use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
 use glenda::mem::shm::ShmParams;
 use glenda::protocol;
 use glenda::protocol::fs::OpenFlags;
-use glenda::utils::manager::{CSpaceManager, CSpaceService};
+use glenda::interface::{CSpaceService, VSpaceService};
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 use crate::fs::InitrdFS;
 use crate::layout::{RING_SLOT, SHM_SLOT};
@@ -30,7 +30,8 @@ pub struct InitrdServer<'a> {
     reply: Reply,
     recv: CapPtr,
     running: bool,
-    cspace: CSpaceManager,
+    cspace: &'a mut CSpaceManager,
+    vspace: &'a mut VSpaceManager,
 }
 
 impl<'a> InitrdServer<'a> {
@@ -38,6 +39,8 @@ impl<'a> InitrdServer<'a> {
         dev_ep: Endpoint,
         res_client: &'a mut ResourceClient,
         vfs_client: &'a mut FsClient,
+        cspace: &'a mut CSpaceManager,
+        vspace: &'a mut VSpaceManager,
     ) -> Self {
         Self {
             blk_client: None,
@@ -52,7 +55,8 @@ impl<'a> InitrdServer<'a> {
             reply: Reply::from(CapPtr::null()),
             recv: CapPtr::null(),
             running: false,
-            cspace: CSpaceManager::new(CSPACE_CAP, 16),
+            cspace,
+            vspace,
         }
     }
 }
@@ -84,7 +88,7 @@ impl<'a> SystemService for InitrdServer<'a> {
 
         let mut blk_client =
             VolumeClient::new(self.dev_ep, self.res_client, ring_params, shm_params);
-        blk_client.connect()?;
+        blk_client.connect(self.vspace, self.cspace)?;
 
         self.blk_client = Some(blk_client);
 
@@ -216,7 +220,14 @@ impl<'a> SystemService for InitrdServer<'a> {
                     s.next_vaddr += size;
 
                     if let Some(f) = frame {
-                        s.res_client.mmap(Badge::null(), f, addr_server, size)?;
+                        s.vspace.map_frame(
+                            f,
+                            addr_server,
+                            glenda::mem::Perms::READ | glenda::mem::Perms::WRITE,
+                            size / 4096,
+                            s.res_client,
+                            s.cspace,
+                        )?;
                     }
 
                     handle.setup_iouring(blk_client, badge, addr_server, addr_user, size, frame)?;

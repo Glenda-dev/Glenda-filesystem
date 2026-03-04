@@ -8,6 +8,7 @@ use glenda::io::uring::IoUringClient;
 use glenda::io::uring::RingParams;
 use glenda::mem::shm::SharedMemory;
 use glenda::mem::shm::ShmParams;
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 pub struct BlockReader {
     client: VolumeClient,
@@ -23,8 +24,12 @@ impl BlockReader {
         Self { client: VolumeClient::new(endpoint, res_client, ring_params, shm_params) }
     }
 
-    pub fn init(&mut self) -> Result<(), Error> {
-        self.client.connect()
+    pub fn init(
+        &mut self,
+        vspace: &mut VSpaceManager,
+        cspace: &mut CSpaceManager,
+    ) -> Result<(), Error> {
+        self.client.connect(vspace, cspace)
     }
 
     pub fn set_shm(&mut self, shm: SharedMemory) {

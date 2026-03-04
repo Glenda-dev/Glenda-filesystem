@@ -3,6 +3,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use glenda::cap::{CapPtr, Endpoint, Reply};
 use glenda::client::ResourceClient;
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
 use glenda::interface::system::SystemService;
@@ -12,7 +13,7 @@ use glenda::protocol;
 use glenda::protocol::fs::OpenFlags;
 use glenda::protocol::{FS_PROTO, PROCESS_PROTO};
 
-pub struct FatFsService {
+pub struct FatFsService<'a> {
     fs: Option<FatFs>,
     handles: BTreeMap<usize, Box<dyn FileHandleService + Send>>,
     next_handle_id: usize,
@@ -22,12 +23,20 @@ pub struct FatFsService {
     running: bool,
     ring_vaddr: usize,
     ring_size: usize,
+
+    pub cspace: &'a mut CSpaceManager,
+    pub vspace: &'a mut VSpaceManager,
 }
 
 const RECV_SLOT: CapPtr = CapPtr::from(0x100);
 
-impl FatFsService {
-    pub fn new(ring_vaddr: usize, ring_size: usize) -> Self {
+impl<'a> FatFsService<'a> {
+    pub fn new(
+        ring_vaddr: usize,
+        ring_size: usize,
+        cspace: &'a mut CSpaceManager,
+        vspace: &'a mut VSpaceManager,
+    ) -> Self {
         Self {
             fs: None,
             handles: BTreeMap::new(),
@@ -38,6 +47,8 @@ impl FatFsService {
             running: false,
             ring_vaddr,
             ring_size,
+            cspace,
+            vspace,
         }
     }
 
@@ -47,12 +58,19 @@ impl FatFsService {
         res_client: &mut ResourceClient,
     ) -> Result<(), Error> {
         // Initialize FatFs with the block device
-        self.fs = Some(FatFs::new(block_device, self.ring_vaddr, self.ring_size, res_client)?);
+        self.fs = Some(FatFs::new(
+            block_device,
+            self.ring_vaddr,
+            self.ring_size,
+            res_client,
+            self.vspace,
+            self.cspace,
+        )?);
         Ok(())
     }
 }
 
-impl SystemService for FatFsService {
+impl<'a> SystemService for FatFsService<'a> {
     fn init(&mut self) -> Result<(), Error> {
         Ok(())
     }

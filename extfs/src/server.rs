@@ -11,8 +11,9 @@ use glenda::ipc::{MsgTag, UTCB};
 use glenda::protocol::fs::OpenFlags;
 use glenda::protocol::process;
 use glenda::protocol::{FS_PROTO, PROCESS_PROTO};
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
-pub struct Ext4Service {
+pub struct Ext4Service<'a> {
     fs: Option<ExtFs>,
     handles: BTreeMap<usize, Box<dyn FileHandleService + Send>>,
     endpoint: Endpoint,
@@ -22,12 +23,20 @@ pub struct Ext4Service {
     next_handle_id: usize,
     ring_vaddr: usize,
     ring_size: usize,
+
+    pub cspace: &'a mut CSpaceManager,
+    pub vspace: &'a mut VSpaceManager,
 }
 
 const RECV_SLOT: CapPtr = CapPtr::from(0x100);
 
-impl Ext4Service {
-    pub fn new(ring_vaddr: usize, ring_size: usize) -> Self {
+impl<'a> Ext4Service<'a> {
+    pub fn new(
+        ring_vaddr: usize,
+        ring_size: usize,
+        cspace: &'a mut CSpaceManager,
+        vspace: &'a mut VSpaceManager,
+    ) -> Self {
         Self {
             fs: None,
             handles: BTreeMap::new(),
@@ -38,6 +47,8 @@ impl Ext4Service {
             next_handle_id: 100,
             ring_vaddr,
             ring_size,
+            cspace,
+            vspace,
         }
     }
 
@@ -46,12 +57,19 @@ impl Ext4Service {
         block_device: Endpoint,
         res_client: &mut ResourceClient,
     ) -> Result<(), Error> {
-        self.fs = Some(ExtFs::new(block_device, self.ring_vaddr, self.ring_size, res_client)?);
+        self.fs = Some(ExtFs::new(
+            block_device,
+            self.ring_vaddr,
+            self.ring_size,
+            res_client,
+            self.vspace,
+            self.cspace,
+        )?);
         Ok(())
     }
 }
 
-impl SystemService for Ext4Service {
+impl<'a> SystemService for Ext4Service<'a> {
     fn init(&mut self) -> Result<(), Error> {
         Ok(())
     }
@@ -84,7 +102,7 @@ impl SystemService for Ext4Service {
 
     fn dispatch(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
         let badge = utcb.get_badge();
-        glenda::ipc_dispatch! {
+        let _ = glenda::ipc_dispatch! {
             self, utcb,
             (FS_PROTO, glenda::protocol::fs::OPEN) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
@@ -146,7 +164,8 @@ impl SystemService for Ext4Service {
                 s.running = false;
                 Ok(())
             }
-        }
+        };
+        Ok(())
     }
 
     fn reply(&mut self, utcb: &mut UTCB) -> Result<(), Error> {

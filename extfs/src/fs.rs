@@ -17,6 +17,7 @@ use glenda::io::uring::RingParams;
 use glenda::ipc::Badge;
 use glenda::mem::shm::ShmParams;
 use glenda::protocol::fs::{DEntry, OpenFlags, Stat};
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 pub struct ExtFs {
     reader: BlockReader,
@@ -38,6 +39,8 @@ impl ExtFs {
         ring_vaddr: usize,
         ring_size: usize,
         res_client: &mut ResourceClient,
+        vspace: &mut VSpaceManager,
+        cspace: &mut CSpaceManager,
     ) -> Result<Self, Error> {
         // 1. Setup IoUring Params
         let sq_entries = 4;
@@ -67,7 +70,7 @@ impl ExtFs {
 
         // 2. Create reader and init (VolumeClient handles handshake)
         let mut reader = BlockReader::new(block_device, res_client, ring_params, shm_params);
-        reader.init()?;
+        reader.init(vspace, cspace)?;
 
         // ... (existing helper logic in new)
         let mut sb_buf = [0u8; 1024];

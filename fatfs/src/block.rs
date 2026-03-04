@@ -6,6 +6,7 @@ use glenda::client::volume::VolumeClient;
 use glenda::io::uring::RingParams;
 use glenda::mem::shm::ShmParams;
 use glenda::client::ResourceClient;
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 extern crate alloc;
 
 pub struct BlockReader {
@@ -24,8 +25,8 @@ impl BlockReader {
         }
     }
 
-    pub fn init(&mut self) -> Result<(), Error> {
-        self.client.connect()
+    pub fn init(&mut self, vspace: &mut VSpaceManager, cspace: &mut CSpaceManager) -> Result<(), Error> {
+        self.client.connect(vspace, cspace)
     }
 
     pub fn endpoint(&self) -> Endpoint {
