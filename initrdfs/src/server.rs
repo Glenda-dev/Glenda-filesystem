@@ -192,7 +192,7 @@ impl<'a> SystemService for InitrdServer<'a> {
                     let blk_client = s.blk_client.as_ref().ok_or(Error::NotInitialized)?;
                     let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
                     let len = u_inner.get_mr(0);
-                    let offset = u_inner.get_mr(1) as u64;
+                    let offset = u_inner.get_mr(1) as usize;
                     let buf = u_inner.buffer_mut();
                     if len > buf.len() {
                         return Err(Error::InvalidArgs);

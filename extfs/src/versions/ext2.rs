@@ -12,7 +12,7 @@ impl Ext2Ops {
         index: u32,
         block_size: u32,
     ) -> Result<u32, Error> {
-        let offset = block as u64 * block_size as u64 + index as u64 * 4;
+        let offset = block as usize * block_size as usize + index as usize * 4;
         let mut buf = [0u8; 4];
         reader.read_offset(offset, &mut buf)?;
         let data = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const u32) };

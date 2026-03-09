@@ -5,22 +5,22 @@ use glenda::error::Error;
 pub struct Fat16Ops {
     pub bytes_per_sector: u16,
     pub sectors_per_cluster: u8,
-    pub fat_start_sector: u64,
-    pub root_start_sector: u64,
+    pub fat_start_sector: usize,
+    pub root_start_sector: usize,
     pub root_entries: u16,
-    pub data_start_sector: u64,
+    pub data_start_sector: usize,
 }
 
 impl FatOps for Fat16Ops {
     fn get_next_cluster(&self, reader: &BlockReader, cluster: u32) -> Result<u32, Error> {
-        let fat_offset = cluster as u64 * 2;
-        let fat_sector_offset = fat_offset / self.bytes_per_sector as u64;
-        let entry_offset = (fat_offset % self.bytes_per_sector as u64) as usize;
+        let fat_offset = cluster as usize * 2;
+        let fat_sector_offset = fat_offset / self.bytes_per_sector as usize;
+        let entry_offset = (fat_offset % self.bytes_per_sector as usize) as usize;
 
         let sector = self.fat_start_sector + fat_sector_offset;
 
         let mut buf = alloc::vec![0u8; self.bytes_per_sector as usize];
-        let read_pos = sector * self.bytes_per_sector as u64;
+        let read_pos = sector * self.bytes_per_sector as usize;
         reader.read_offset(read_pos, &mut buf).map_err(|_| Error::IoError)?;
 
         // Read u16
@@ -37,15 +37,15 @@ impl FatOps for Fat16Ops {
         }
     }
 
-    fn cluster_to_sector(&self, cluster: u32) -> u64 {
+    fn cluster_to_sector(&self, cluster: u32) -> usize {
         let rel_cluster = if cluster >= 2 { cluster - 2 } else { 0 };
-        self.data_start_sector + (rel_cluster as u64 * self.sectors_per_cluster as u64)
+        self.data_start_sector + (rel_cluster as usize * self.sectors_per_cluster as usize)
     }
 
     fn get_root_location(&self) -> RootLocation {
         // Size of root dir in sectors
-        let root_dir_size = (self.root_entries as u64 * 32 + self.bytes_per_sector as u64 - 1)
-            / self.bytes_per_sector as u64;
+        let root_dir_size = (self.root_entries as usize * 32 + self.bytes_per_sector as usize - 1)
+            / self.bytes_per_sector as usize;
         RootLocation::Sector(self.root_start_sector, root_dir_size as u32)
     }
 

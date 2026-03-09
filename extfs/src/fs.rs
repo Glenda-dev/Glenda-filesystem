@@ -112,8 +112,8 @@ impl ExtFs {
 
     fn read_group_desc(&self, group: u32) -> Result<GroupDesc, Error> {
         let first_bg_block = self.sb.s_first_data_block + 1;
-        let offset = (first_bg_block as u64 * self.block_size as u64)
-            + (group as u64 * self.group_desc_size as u64);
+        let offset = (first_bg_block as usize * self.block_size as usize)
+            + (group as usize * self.group_desc_size as usize);
 
         let mut buf = [0u8; 64];
         self.reader.read_offset(offset, &mut buf)?;
@@ -134,8 +134,8 @@ impl ExtFs {
 
         let table_block = gd.bg_inode_table_lo;
 
-        let inode_size = self.sb.s_inode_size as u64;
-        let offset = (table_block as u64 * self.block_size as u64) + (index as u64 * inode_size);
+        let inode_size = self.sb.s_inode_size as usize;
+        let offset = (table_block as usize * self.block_size as usize) + (index as usize * inode_size);
 
         let mut buf = [0u8; 256];
         self.reader.read_offset(offset, &mut buf)?;
@@ -173,7 +173,7 @@ impl ExtFs {
             let pblock = self.get_block_addr(&inode, lblock)?;
 
             let mut block_buf = alloc::vec![0u8; self.block_size as usize];
-            let read_offset = pblock as u64 * self.block_size as u64;
+            let read_offset = pblock as usize * self.block_size as usize;
             self.reader.read_offset(read_offset, &mut block_buf)?;
 
             let mut block_offset = 0;
@@ -202,26 +202,26 @@ impl ExtFs {
 }
 
 impl FileSystemJournalService for ExtFs {
-    fn transaction_start(&mut self, _badge: Badge) -> Result<u64, Error> {
+    fn transaction_start(&mut self, _badge: Badge) -> Result<usize, Error> {
         Ok(1)
     }
 
-    fn transaction_commit(&mut self, _badge: Badge, _tid: u64) -> Result<(), Error> {
+    fn transaction_commit(&mut self, _badge: Badge, _tid: usize) -> Result<(), Error> {
         Ok(())
     }
 
-    fn transaction_abort(&mut self, _badge: Badge, _tid: u64) -> Result<(), Error> {
+    fn transaction_abort(&mut self, _badge: Badge, _tid: usize) -> Result<(), Error> {
         Ok(())
     }
 
     fn log_block(
         &mut self,
         _badge: Badge,
-        _tid: u64,
-        block_num: u64,
+        _tid: usize,
+        block_num: usize,
         data: &[u8],
     ) -> Result<(), Error> {
-        let sector = block_num * (self.block_size as u64 / 512);
+        let sector = block_num * (self.block_size as usize / 512);
         self.reader.write_blocks(sector, data)?;
         Ok(())
     }
@@ -270,8 +270,8 @@ impl ExtFs {
         let ino = self.resolve_path(path)?;
         let inode = self.read_inode(ino)?;
         Ok(Stat {
-            ino: ino as u64,
-            size: inode.i_size_lo as u64,
+            ino: ino as usize,
+            size: inode.i_size_lo as usize,
             mode: inode.i_mode as u32,
             ..Default::default()
         })
@@ -283,7 +283,7 @@ pub struct ExtFileHandle {
     reader: BlockReader,
     inode: Inode,
     block_size: u32,
-    pos: u64,
+    pos: usize,
     ring_vaddr: usize,
     ring_size: usize,
     uring: Option<glenda::io::uring::IoUringBuffer>,
@@ -298,16 +298,16 @@ impl FileHandleService for ExtFileHandle {
 
     fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
         Ok(Stat {
-            size: self.inode.i_size_lo as u64,
+            size: self.inode.i_size_lo as usize,
             mode: self.inode.i_mode as u32,
             ..Default::default()
         })
     }
 
-    fn read(&mut self, _badge: Badge, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
-        let _start_block_idx = (offset / self.block_size as u64) as u32;
-        // let end_block_idx = ((offset + buf.len() as u64 + self.block_size as u64 - 1)
-        //     / self.block_size as u64) as u32;
+    fn read(&mut self, _badge: Badge, offset: usize, buf: &mut [u8]) -> Result<usize, Error> {
+        let _start_block_idx = (offset / self.block_size as usize) as u32;
+        // let end_block_idx = ((offset + buf.len() as usize + self.block_size as usize - 1)
+        //     / self.block_size as usize) as u32;
 
         let mut read_len = 0;
         let mut current_offset = offset;
@@ -315,19 +315,19 @@ impl FileHandleService for ExtFileHandle {
 
         // Simple loop
         while buf_ptr < buf.len() {
-            let lblock = (current_offset / self.block_size as u64) as u32;
+            let lblock = (current_offset / self.block_size as usize) as u32;
             let pblock = self
                 .ops
                 .get_block_addr(&self.reader, &self.inode, lblock, self.block_size)
                 .map_err(|_| Error::IoError)?;
 
-            let blk_offset_in_buf = (current_offset % self.block_size as u64) as usize;
+            let blk_offset_in_buf = (current_offset % self.block_size as usize) as usize;
             let chuck_len =
                 core::cmp::min(buf.len() - buf_ptr, self.block_size as usize - blk_offset_in_buf);
 
             let mut block_data = alloc::vec![0u8; self.block_size as usize];
             if pblock != 0 {
-                let read_offset = pblock as u64 * self.block_size as u64;
+                let read_offset = pblock as usize * self.block_size as usize;
                 self.reader.read_offset(read_offset, &mut block_data)?;
             } else {
                 // Sparse block, zeroed
@@ -337,17 +337,17 @@ impl FileHandleService for ExtFileHandle {
                 .copy_from_slice(&block_data[blk_offset_in_buf..blk_offset_in_buf + chuck_len]);
 
             read_len += chuck_len;
-            current_offset += chuck_len as u64;
+            current_offset += chuck_len as usize;
             buf_ptr += chuck_len;
 
-            if current_offset >= self.inode.i_size_lo as u64 {
+            if current_offset >= self.inode.i_size_lo as usize {
                 break;
             }
         }
         Ok(read_len)
     }
 
-    fn write(&mut self, _badge: Badge, offset: u64, buf: &[u8]) -> Result<usize, Error> {
+    fn write(&mut self, _badge: Badge, offset: usize, buf: &[u8]) -> Result<usize, Error> {
         // Simplified write - assumes no allocation needed for existing blocks or implementing minimal allocation is hard here without FS ref.
         // But writes usually go through FS service for allocation?
         // Wait, `FileHandle::write` is called on the handle. The handle needs access to allocator if extending.
@@ -368,7 +368,7 @@ impl FileHandleService for ExtFileHandle {
         let mut buf_ptr = 0;
 
         while buf_ptr < buf.len() {
-            let lblock = (current_offset / self.block_size as u64) as u32;
+            let lblock = (current_offset / self.block_size as usize) as u32;
             // This fails if block not allocated
             let pblock = self
                 .ops
@@ -379,13 +379,13 @@ impl FileHandleService for ExtFileHandle {
                 return Err(Error::InternalError); // Cannot allocate in this simple handle
             }
 
-            let blk_offset_in_buf = (current_offset % self.block_size as u64) as usize;
+            let blk_offset_in_buf = (current_offset % self.block_size as usize) as usize;
             let chuck_len =
                 core::cmp::min(buf.len() - buf_ptr, self.block_size as usize - blk_offset_in_buf);
 
             // Read
             let mut block_data = alloc::vec![0u8; self.block_size as usize];
-            let read_offset = pblock as u64 * self.block_size as u64;
+            let read_offset = pblock as usize * self.block_size as usize;
             self.reader.read_offset(read_offset, &mut block_data)?;
 
             // Modify
@@ -394,10 +394,10 @@ impl FileHandleService for ExtFileHandle {
 
             // Write
             self.reader
-                .write_blocks(pblock as u64 * (self.block_size / 512) as u64, &block_data)?;
+                .write_blocks(pblock as usize * (self.block_size / 512) as usize, &block_data)?;
 
             written += chuck_len;
-            current_offset += chuck_len as u64;
+            current_offset += chuck_len as usize;
             buf_ptr += chuck_len;
         }
 
@@ -408,7 +408,7 @@ impl FileHandleService for ExtFileHandle {
         Err(Error::NotImplemented)
     }
 
-    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<u64, Error> {
+    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<usize, Error> {
         Err(Error::NotImplemented)
     }
 
@@ -416,43 +416,43 @@ impl FileHandleService for ExtFileHandle {
         Ok(())
     }
 
-    fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
+    fn truncate(&mut self, _badge: Badge, _size: usize) -> Result<(), Error> {
         Err(Error::NotImplemented)
     }
 }
 
 impl ExtFileHandle {
-    fn read_shm_internal(&self, offset: u64, len: u32, shm_vaddr: usize) -> Result<usize, Error> {
+    fn read_shm_internal(&self, offset: usize, len: u32, shm_vaddr: usize) -> Result<usize, Error> {
         let mut read_len = 0;
         let mut current_offset = offset;
         let mut current_shm_vaddr = shm_vaddr;
         let mut remaining = len as usize;
 
         while remaining > 0 {
-            let lblock = (current_offset / self.block_size as u64) as u32;
+            let lblock = (current_offset / self.block_size as usize) as u32;
             let pblock = self
                 .ops
                 .get_block_addr(&self.reader, &self.inode, lblock, self.block_size)
                 .map_err(|_| Error::IoError)?;
 
-            let blk_offset_in_block = (current_offset % self.block_size as u64) as usize;
+            let blk_offset_in_block = (current_offset % self.block_size as usize) as usize;
             let chunk_len =
                 core::cmp::min(remaining, self.block_size as usize - blk_offset_in_block);
 
             if pblock != 0 {
                 let read_offset =
-                    pblock as u64 * self.block_size as u64 + blk_offset_in_block as u64;
+                    pblock as usize * self.block_size as usize + blk_offset_in_block as usize;
                 self.reader.read_shm(read_offset, chunk_len as u32, current_shm_vaddr)?;
             } else {
                 unsafe { core::ptr::write_bytes(current_shm_vaddr as *mut u8, 0, chunk_len) };
             }
 
             read_len += chunk_len;
-            current_offset += chunk_len as u64;
+            current_offset += chunk_len as usize;
             current_shm_vaddr += chunk_len;
             remaining -= chunk_len;
 
-            if current_offset >= self.inode.i_size_lo as u64 {
+            if current_offset >= self.inode.i_size_lo as usize {
                 break;
             }
         }

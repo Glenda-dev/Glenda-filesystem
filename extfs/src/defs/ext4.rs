@@ -1,4 +1,4 @@
-pub const SUPER_BLOCK_OFFSET: u64 = 1024;
+pub const SUPER_BLOCK_OFFSET: usize = 1024;
 pub const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 
 // Fixed inode numbers
@@ -68,26 +68,26 @@ pub struct SuperBlock {
     pub s_flags: u32,
     pub s_raid_stride: u16,
     pub s_mmp_interval: u16,
-    pub s_mmp_block: u64,
+    pub s_mmp_block: usize,
     pub s_raid_stripe_width: u32,
     pub s_log_groups_per_flex: u8,
     pub s_checksum_type: u8,
     pub s_reserved_pad: u16,
-    pub s_kbytes_written: u64,
+    pub s_kbytes_written: usize,
     pub s_snapshot_inum: u32,
     pub s_snapshot_id: u32,
-    pub s_snapshot_r_blocks_count: u64,
+    pub s_snapshot_r_blocks_count: usize,
     pub s_snapshot_list: u32,
     pub s_error_count: u32,
     pub s_first_error_time: u32,
     pub s_first_error_ino: u32,
-    pub s_first_error_block: u64,
+    pub s_first_error_block: usize,
     pub s_first_error_func: [u8; 32],
     pub s_first_error_line: u32,
     pub s_last_error_time: u32,
     pub s_last_error_ino: u32,
     pub s_last_error_line: u32,
-    pub s_last_error_block: u64,
+    pub s_last_error_block: usize,
     pub s_last_error_func: [u8; 32],
     pub s_mount_opts: [u8; 64],
     pub s_usr_quota_inum: u32,

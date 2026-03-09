@@ -78,8 +78,8 @@ impl FatFs {
             Arc::new(ExFatOps {
                 bytes_per_sector,
                 sectors_per_cluster,
-                fat_start_sector: bpb.partition_offset + bpb.fat_offset as u64,
-                data_start_sector: bpb.partition_offset + bpb.cluster_heap_offset as u64,
+                fat_start_sector: bpb.partition_offset + bpb.fat_offset as usize,
+                data_start_sector: bpb.partition_offset + bpb.cluster_heap_offset as usize,
                 root_cluster: bpb.root_dir_cluster,
             })
         } else {
@@ -106,21 +106,21 @@ impl FatFs {
                 Arc::new(Fat16Ops {
                     bytes_per_sector: bytes_per_sec,
                     sectors_per_cluster: bpb.sec_per_clus,
-                    fat_start_sector: bpb.rsvd_sec_cnt as u64,
+                    fat_start_sector: bpb.rsvd_sec_cnt as usize,
                     root_start_sector: (bpb.rsvd_sec_cnt as u32 + (bpb.num_fats as u32 * fat_sz))
-                        as u64,
+                        as usize,
                     root_entries: bpb.root_ent_cnt,
                     data_start_sector: (bpb.rsvd_sec_cnt as u32
                         + (bpb.num_fats as u32 * fat_sz)
-                        + root_dir_sectors) as u64,
+                        + root_dir_sectors) as usize,
                 })
             } else {
                 Arc::new(Fat32Ops {
                     bytes_per_sector: bytes_per_sec,
                     sectors_per_cluster: bpb.sec_per_clus,
-                    fat_start_sector: bpb.rsvd_sec_cnt as u64,
+                    fat_start_sector: bpb.rsvd_sec_cnt as usize,
                     data_start_sector: (bpb.rsvd_sec_cnt as u32 + (bpb.num_fats as u32 * fat_sz))
-                        as u64,
+                        as usize,
                     root_cluster: bpb.root_clus,
                 })
             }
@@ -155,11 +155,11 @@ impl FatFs {
 
     pub fn read_cluster(&self, cluster: u32, buf: &mut [u8]) -> Result<(), Error> {
         let sector = self.ops.cluster_to_sector(cluster);
-        let size = (self.ops.sectors_per_cluster() as u64) * (self.ops.bytes_per_sector() as u64);
+        let size = (self.ops.sectors_per_cluster() as usize) * (self.ops.bytes_per_sector() as usize);
         if buf.len() < size as usize {
             return Err(Error::MessageTooLong);
         }
-        let offset = sector * (self.ops.bytes_per_sector() as u64);
+        let offset = sector * (self.ops.bytes_per_sector() as usize);
         self.reader
             .read_offset(offset, &mut buf[..size as usize])
             .map_err(|_| Error::IoError)
@@ -168,12 +168,12 @@ impl FatFs {
 
     fn read_sectors(
         &self,
-        start_sector: u64,
+        start_sector: usize,
         num_sectors: u32,
         buf: &mut [u8],
     ) -> Result<(), Error> {
-        let bps = self.ops.bytes_per_sector() as u64;
-        let size = num_sectors as u64 * bps;
+        let bps = self.ops.bytes_per_sector() as usize;
+        let size = num_sectors as usize * bps;
         if buf.len() < size as usize {
             return Err(Error::MessageTooLong);
         }
@@ -262,7 +262,7 @@ impl FatFs {
                 Err(Error::NotFound)
             }
             RootLocation::Sector(start, count) => {
-                let bytes_len = (count as u64 * self.ops.bytes_per_sector() as u64) as usize;
+                let bytes_len = (count as usize * self.ops.bytes_per_sector() as usize) as usize;
                 let mut buf = alloc::vec![0u8; bytes_len];
                 self.read_sectors(start, count, &mut buf)?;
                 self.scan_dir_entries(&buf, name)
@@ -350,7 +350,7 @@ impl FatFs {
             ops: self.ops.clone(),
             first_cluster,
             pos: 0,
-            size: entry.file_size as u64,
+            size: entry.file_size as usize,
             ring_vaddr: self.ring_vaddr,
             ring_size: self.ring_size,
             uring: None,
@@ -370,7 +370,7 @@ impl FatFs {
     pub fn stat_path(&mut self, path: &str) -> Result<Stat, Error> {
         let entry = self.lookup(path)?;
         let mut stat = Stat::default();
-        stat.size = entry.file_size as u64;
+        stat.size = entry.file_size as usize;
         stat.mode = if (entry.attr & 0x10) != 0 { 0o040755 } else { 0o100644 };
         Ok(stat)
     }
@@ -384,8 +384,8 @@ pub struct FatFileHandle {
     reader: BlockReader,
     ops: Arc<dyn FatOps>,
     first_cluster: u32,
-    pos: u64,
-    size: u64,
+    pos: usize,
+    size: usize,
     ring_vaddr: usize,
     ring_size: usize,
     uring: Option<glenda::io::uring::IoUringBuffer>,
@@ -394,8 +394,8 @@ pub struct FatFileHandle {
 }
 
 impl FatFileHandle {
-    fn get_cluster_by_pos(&self, pos: u64) -> Result<u32, Error> {
-        let cluster_size = (self.ops.sectors_per_cluster() * self.ops.bytes_per_sector()) as u64;
+    fn get_cluster_by_pos(&self, pos: usize) -> Result<u32, Error> {
+        let cluster_size = (self.ops.sectors_per_cluster() * self.ops.bytes_per_sector()) as usize;
         let cluster_index = (pos / cluster_size) as u32;
 
         // Simple linear scan from start. Optimizations: cache current cluster key.
@@ -409,13 +409,13 @@ impl FatFileHandle {
         Ok(curr)
     }
 
-    fn read_shm_internal(&self, offset: u64, len: u32, shm_vaddr: usize) -> Result<usize, Error> {
+    fn read_shm_internal(&self, offset: usize, len: u32, shm_vaddr: usize) -> Result<usize, Error> {
         if offset >= self.size {
             return Ok(0);
         }
 
-        let read_len = core::cmp::min(len as u64, self.size - offset) as usize;
-        let cluster_size = (self.ops.sectors_per_cluster() * self.ops.bytes_per_sector()) as u64;
+        let read_len = core::cmp::min(len as usize, self.size - offset) as usize;
+        let cluster_size = (self.ops.sectors_per_cluster() * self.ops.bytes_per_sector()) as usize;
 
         let mut current_pos = offset;
         let mut current_shm_vaddr = shm_vaddr;
@@ -429,11 +429,11 @@ impl FatFileHandle {
 
             let cluster_start_sector = self.ops.cluster_to_sector(current_cluster);
             let abs_offset =
-                cluster_start_sector * (self.ops.bytes_per_sector() as u64) + cluster_offset as u64;
+                cluster_start_sector * (self.ops.bytes_per_sector() as usize) + cluster_offset as usize;
 
             self.reader.read_shm(abs_offset, chunk_len as u32, current_shm_vaddr)?;
 
-            current_pos += chunk_len as u64;
+            current_pos += chunk_len as usize;
             current_shm_vaddr += chunk_len;
             remaining -= chunk_len;
         }
@@ -443,17 +443,17 @@ impl FatFileHandle {
 }
 
 impl FileHandleService for FatFileHandle {
-    fn read(&mut self, _badge: Badge, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    fn read(&mut self, _badge: Badge, offset: usize, buf: &mut [u8]) -> Result<usize, Error> {
         if offset >= self.size {
             return Ok(0);
         }
 
-        let read_len = core::cmp::min(buf.len() as u64, self.size - offset) as usize;
+        let read_len = core::cmp::min(buf.len() as usize, self.size - offset) as usize;
         if read_len == 0 {
             return Ok(0);
         }
 
-        let cluster_size = (self.ops.sectors_per_cluster() * self.ops.bytes_per_sector()) as u64;
+        let cluster_size = (self.ops.sectors_per_cluster() * self.ops.bytes_per_sector()) as usize;
         let mut buf_offset = 0;
         let mut current_pos = offset;
 
@@ -470,18 +470,18 @@ impl FileHandleService for FatFileHandle {
             // For simplicity, we can read the whole cluster or do sector logic.
             // Let's use ops helper to find sector start of cluster.
             let cluster_start_sector = self.ops.cluster_to_sector(current_cluster);
-            let target_sector = cluster_start_sector + sector_in_cluster as u64;
+            let target_sector = cluster_start_sector + sector_in_cluster as usize;
 
             // Read sector
             // Optimization: if bytes_to_read spans multiple sectors, handle it.
             // Here we assume BlockReader works on bytes via read_offset.
             let abs_offset =
-                target_sector * (self.ops.bytes_per_sector() as u64) + sector_offset as u64;
+                target_sector * (self.ops.bytes_per_sector() as usize) + sector_offset as usize;
 
             self.reader
                 .read_offset(abs_offset, &mut buf[buf_offset..buf_offset + bytes_to_read])?;
 
-            current_pos += bytes_to_read as u64;
+            current_pos += bytes_to_read as usize;
             buf_offset += bytes_to_read;
         }
 
@@ -489,7 +489,7 @@ impl FileHandleService for FatFileHandle {
         Ok(read_len)
     }
 
-    fn write(&mut self, _badge: Badge, _offset: u64, _buf: &[u8]) -> Result<usize, Error> {
+    fn write(&mut self, _badge: Badge, _offset: usize, _buf: &[u8]) -> Result<usize, Error> {
         // Read-only for now
         Ok(0)
     }
@@ -509,7 +509,7 @@ impl FileHandleService for FatFileHandle {
         Err(Error::NotImplemented)
     }
 
-    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<u64, Error> {
+    fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<usize, Error> {
         Err(Error::NotImplemented)
     }
 
@@ -517,7 +517,7 @@ impl FileHandleService for FatFileHandle {
         Ok(())
     }
 
-    fn truncate(&mut self, _badge: Badge, _size: u64) -> Result<(), Error> {
+    fn truncate(&mut self, _badge: Badge, _size: usize) -> Result<(), Error> {
         Err(Error::NotImplemented)
     }
 }

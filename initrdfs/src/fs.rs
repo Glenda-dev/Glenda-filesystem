@@ -12,22 +12,22 @@ pub const DEFAULT_STAT: u32 = 0o100444;
 #[derive(Clone, Debug)]
 pub struct InitrdEntry {
     pub _type: u8,
-    pub offset: u64,
-    pub size: u64,
+    pub offset: usize,
+    pub size: usize,
     pub name: String,
 }
 
 // Represents an open file in Initrd
 pub struct InitrdFile {
-    pub offset: u64,
-    pub size: u64,
+    pub offset: usize,
+    pub size: usize,
     pub uring: Option<IoUringBuffer>,
     pub user_shm_base: usize,
     pub server_shm_base: usize,
 }
 
 impl InitrdFile {
-    pub fn new(offset: u64, size: u64) -> Self {
+    pub fn new(offset: usize, size: usize) -> Self {
         Self { offset, size, uring: None, user_shm_base: 0, server_shm_base: 0 }
     }
 
@@ -35,18 +35,18 @@ impl InitrdFile {
         &mut self,
         blk_client: &VolumeClient,
         _badge: Badge,
-        offset: u64,
+        offset: usize,
         buf: &mut [u8],
     ) -> Result<usize, Error> {
         if offset >= self.size {
             return Ok(0);
         }
         let available = self.size - offset;
-        let read_len = core::cmp::min(available, buf.len() as u64) as usize;
+        let read_len = core::cmp::min(available, buf.len() as usize) as usize;
 
         let block_size = 4096;
         let start_pos = self.offset + offset;
-        let end_pos = start_pos + read_len as u64;
+        let end_pos = start_pos + read_len as usize;
 
         let start_sector = start_pos / block_size;
         let end_sector = (end_pos + block_size - 1) / block_size;
@@ -100,7 +100,7 @@ impl InitrdFile {
                     IOURING_OP_READ => {
                         let addr = sqe.addr as usize;
                         let len = sqe.len as u32;
-                        let offset = sqe.off as u64;
+                        let offset = sqe.off as usize;
 
                         if addr < self.user_shm_base {
                             -(Error::InvalidArgs as i32)
@@ -152,13 +152,13 @@ impl InitrdFS {
                 header_buf[offset + 2],
                 header_buf[offset + 3],
                 header_buf[offset + 4],
-            ]) as u64;
+            ]) as usize;
             let file_size = u32::from_le_bytes([
                 header_buf[offset + 5],
                 header_buf[offset + 6],
                 header_buf[offset + 7],
                 header_buf[offset + 8],
-            ]) as u64;
+            ]) as usize;
 
             let mut name_buf = [0u8; 32];
             name_buf.copy_from_slice(&header_buf[offset + 16..offset + 48]);

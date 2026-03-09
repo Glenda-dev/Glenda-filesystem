@@ -150,7 +150,7 @@ impl<'a> SystemService for FatFsService<'a> {
             (FS_PROTO, protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let id = u_inner.get_mr(0);
-                    let offset = u_inner.get_mr(1) as u64;
+                    let offset = u_inner.get_mr(1) as usize;
                     let len = u_inner.get_mr(2);
                     let handle = s.handles.get_mut(&id).ok_or(Error::NotFound)?;
 

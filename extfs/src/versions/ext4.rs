@@ -11,7 +11,7 @@ pub struct Ext4Ops;
 
 impl Ext4Ops {
     // Helper to binary search extents in a block/buffer
-    fn search_extent_block(&self, data: &[u8], lblock: u32) -> Result<u64, Error> {
+    fn search_extent_block(&self, data: &[u8], lblock: u32) -> Result<usize, Error> {
         // data starts with ExtentHeader
         let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const ExtentHeader) };
         if header.eh_magic != EXT4_EXT_MAGIC {
@@ -39,7 +39,7 @@ impl Ext4Ops {
                     let relative = lblock - extent.ee_block;
                     let start_hi = (extent.ee_start_hi as u64) << 32;
                     let start_lo = extent.ee_start_lo as u64;
-                    return Ok((start_hi | start_lo) + relative as u64);
+                    return Ok((start_hi | start_lo) as usize + relative as usize);
                 }
             }
         } else {
@@ -67,7 +67,7 @@ impl Ext4Ops {
                 if lblock >= idx.ei_block && lblock < next_block {
                     let leaf_block_hi = (idx.ei_leaf_hi as u64) << 32;
                     let leaf_block_lo = idx.ei_leaf_lo as u64;
-                    return Ok(leaf_block_hi | leaf_block_lo);
+                    return Ok((leaf_block_hi | leaf_block_lo) as usize);
                 }
             }
         }
@@ -128,7 +128,7 @@ impl ExtOps for Ext4Ops {
 
         while curr_depth > 0 {
             reader.read_offset(
-                curr_phys * block_size as u64,
+                curr_phys * block_size as usize,
                 &mut current_block_data[0..block_size as usize],
             )?;
 

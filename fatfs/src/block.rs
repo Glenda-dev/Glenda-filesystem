@@ -41,14 +41,14 @@ impl BlockReader {
         self.client.set_ring(ring);
     }
 
-    pub fn read_offset(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    pub fn read_offset(&self, offset: usize, buf: &mut [u8]) -> Result<usize, Error> {
         if buf.is_empty() {
             return Ok(0);
         }
 
-        let block_size: u64 = 4096;
+        let block_size: usize = 4096;
         let start_pos = offset;
-        let end_pos = start_pos + buf.len() as u64;
+        let end_pos = start_pos + buf.len() as usize;
 
         let start_sector = start_pos / block_size;
         let end_sector = (end_pos + block_size - 1) / block_size;
@@ -56,7 +56,7 @@ impl BlockReader {
         let read_size = sector_count * block_size;
 
         // Perform aligned read using temporary buffer if necessary
-        if start_pos % block_size == 0 && buf.len() as u64 == read_size {
+        if start_pos % block_size == 0 && buf.len() as usize == read_size {
             self.client.read_at(start_sector, buf.len() as u32, buf)?;
         } else {
             let mut temp_buf = alloc::vec::Vec::new();
@@ -68,21 +68,21 @@ impl BlockReader {
         Ok(buf.len())
     }
 
-    pub fn read_shm(&self, offset: u64, len: u32, shm_vaddr: usize) -> Result<(), Error> {
+    pub fn read_shm(&self, offset: usize, len: u32, shm_vaddr: usize) -> Result<(), Error> {
         self.client.read_shm(offset, len, shm_vaddr)
     }
 
-    pub fn write_blocks(&self, sector: u64, buf: &[u8]) -> Result<(), Error> {
-        let block_size: u64 = 4096;
+    pub fn write_blocks(&self, sector: usize, buf: &[u8]) -> Result<(), Error> {
+        let block_size: usize = 4096;
         let start_pos = sector * 512;
-        let end_pos = start_pos + buf.len() as u64;
+        let end_pos = start_pos + buf.len() as usize;
 
         let start_sector = start_pos / block_size;
         let end_sector = (end_pos + block_size - 1) / block_size;
         let sector_count = end_sector - start_sector;
         let read_size = sector_count * block_size;
 
-        if start_pos % block_size == 0 && buf.len() as u64 == read_size {
+        if start_pos % block_size == 0 && buf.len() as usize == read_size {
             self.client.write_at(start_sector, buf.len() as u32, buf)
         } else {
             // Read-Modify-Write
