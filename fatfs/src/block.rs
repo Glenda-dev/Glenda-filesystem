@@ -14,6 +14,14 @@ pub struct BlockReader {
 }
 
 impl BlockReader {
+    fn device_block_size(&self) -> Result<usize, Error> {
+        let block_size = self.client.block_size() as usize;
+        if block_size == 0 {
+            return Err(Error::NotInitialized);
+        }
+        Ok(block_size)
+    }
+
     pub fn new(
         endpoint: Endpoint,
         res_client: &mut ResourceClient,
@@ -46,7 +54,7 @@ impl BlockReader {
             return Ok(0);
         }
 
-        let block_size: usize = 4096;
+        let block_size = self.device_block_size()?;
         let start_pos = offset;
         let end_pos = start_pos + buf.len() as usize;
 
@@ -69,11 +77,41 @@ impl BlockReader {
     }
 
     pub fn read_shm(&self, offset: usize, len: u32, shm_vaddr: usize) -> Result<(), Error> {
-        self.client.read_shm(offset, len, shm_vaddr)
+        if len == 0 {
+            return Ok(());
+        }
+
+        let block_size = self.device_block_size()?;
+        let len_usize = len as usize;
+        let start_pos = offset;
+        let end_pos = start_pos + len_usize;
+
+        let start_sector = start_pos / block_size;
+        let end_sector = (end_pos + block_size - 1) / block_size;
+        let sector_count = end_sector - start_sector;
+        let read_size = sector_count * block_size;
+
+        if start_pos % block_size == 0 && len_usize == read_size {
+            self.client.read_shm(start_sector, len, shm_vaddr)
+        } else {
+            let mut temp_buf = alloc::vec::Vec::new();
+            temp_buf.resize(read_size, 0u8);
+            self.client.read_at(start_sector, read_size as u32, &mut temp_buf)?;
+            let copy_start = start_pos % block_size;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    temp_buf[copy_start..copy_start + len_usize].as_ptr(),
+                    shm_vaddr as *mut u8,
+                    len_usize,
+                );
+            }
+            Ok(())
+        }
     }
 
+    /// `sector` uses 512-byte logical sectors.
     pub fn write_blocks(&self, sector: usize, buf: &[u8]) -> Result<(), Error> {
-        let block_size: usize = 4096;
+        let block_size = self.device_block_size()?;
         let start_pos = sector * 512;
         let end_pos = start_pos + buf.len() as usize;
 

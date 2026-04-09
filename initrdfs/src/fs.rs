@@ -27,6 +27,14 @@ pub struct InitrdFile {
 }
 
 impl InitrdFile {
+    fn device_block_size(blk_client: &VolumeClient) -> Result<usize, Error> {
+        let block_size = blk_client.block_size() as usize;
+        if block_size == 0 {
+            return Err(Error::NotInitialized);
+        }
+        Ok(block_size)
+    }
+
     pub fn new(offset: usize, size: usize) -> Self {
         Self { offset, size, uring: None, user_shm_base: 0, server_shm_base: 0 }
     }
@@ -44,7 +52,7 @@ impl InitrdFile {
         let available = self.size - offset;
         let read_len = core::cmp::min(available, buf.len() as usize) as usize;
 
-        let block_size = 4096;
+        let block_size = Self::device_block_size(blk_client)?;
         let start_pos = self.offset + offset;
         let end_pos = start_pos + read_len as usize;
 
@@ -106,11 +114,53 @@ impl InitrdFile {
                             -(Error::InvalidArgs as i32)
                         } else {
                             let server_addr = addr - self.user_shm_base + self.server_shm_base;
-                            let start_pos = self.offset + offset;
-                            let start_sector = start_pos / 4096;
-                            match blk_client.read_shm(start_sector, len, server_addr) {
-                                Ok(_) => len as i32,
-                                Err(e) => -(e as i32),
+                            if offset >= self.size {
+                                0
+                            } else {
+                                let available = self.size - offset;
+                                let actual_len = core::cmp::min(available, len as usize);
+                                let block_size = match Self::device_block_size(blk_client) {
+                                    Ok(v) => v,
+                                    Err(e) => return Err(e),
+                                };
+
+                                let start_pos = self.offset + offset;
+                                let end_pos = start_pos + actual_len;
+                                let start_sector = start_pos / block_size;
+                                let end_sector = (end_pos + block_size - 1) / block_size;
+                                let sector_count = end_sector - start_sector;
+                                let read_size = sector_count * block_size;
+
+                                let read_res = if start_pos % block_size == 0
+                                    && actual_len == read_size
+                                {
+                                    blk_client.read_shm(
+                                        start_sector,
+                                        actual_len as u32,
+                                        server_addr,
+                                    )
+                                } else {
+                                    let mut temp_buf = alloc::vec![0u8; read_size];
+                                    blk_client.read_at(
+                                        start_sector,
+                                        read_size as u32,
+                                        &mut temp_buf,
+                                    )?;
+                                    let copy_start = start_pos % block_size;
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            temp_buf[copy_start..copy_start + actual_len].as_ptr(),
+                                            server_addr as *mut u8,
+                                            actual_len,
+                                        );
+                                    }
+                                    Ok(())
+                                };
+
+                                match read_res {
+                                    Ok(_) => actual_len as i32,
+                                    Err(e) => -(e as i32),
+                                }
                             }
                         }
                     }
