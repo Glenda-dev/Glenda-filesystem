@@ -5,13 +5,13 @@ use glenda::client::{FsClient, ResourceClient};
 use glenda::error::Error;
 use glenda::interface::system::SystemService;
 use glenda::interface::VirtualFileSystemService;
+use glenda::interface::{CSpaceService, VSpaceService};
 use glenda::io::uring::RingParams;
 use glenda::ipc::server::handle_call;
 use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
 use glenda::mem::shm::ShmParams;
 use glenda::protocol;
 use glenda::protocol::fs::OpenFlags;
-use glenda::interface::{CSpaceService, VSpaceService};
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 use crate::fs::InitrdFS;
@@ -210,7 +210,7 @@ impl<'a> SystemService for InitrdServer<'a> {
 
                     let frame = if u_inner.get_msg_tag().flags().contains(MsgFlags::HAS_CAP) {
                         let slot = s.cspace.alloc(s.res_client)?;
-                        CSPACE_CAP.move_cap(RECV_SLOT, slot)?;
+                        CSPACE_CAP.transfer_self(RECV_SLOT, slot)?;
                         Some(Frame::from(slot))
                     } else {
                         None
