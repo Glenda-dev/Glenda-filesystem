@@ -1,6 +1,7 @@
 use crate::fs::ExtFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use glenda::cap::{CapPtr, Endpoint, Reply};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
@@ -20,7 +21,6 @@ pub struct Ext4Service<'a> {
     reply: Reply,
     recv: CapPtr,
     running: bool,
-    next_handle_id: usize,
     ring_vaddr: usize,
     ring_size: usize,
 
@@ -44,7 +44,6 @@ impl<'a> Ext4Service<'a> {
             reply: Reply::from(CapPtr::null()),
             recv: CapPtr::null(),
             running: false,
-            next_handle_id: 100,
             ring_vaddr,
             ring_size,
             cspace,
@@ -91,6 +90,7 @@ impl<'a> SystemService for Ext4Service<'a> {
 
             if self.endpoint.recv(&mut utcb).is_ok() {
                 if let Err(e) = self.dispatch(&mut utcb) {
+                    error!("ExtFS dispatch failed: badge={}, err={:?}", utcb.get_badge().bits(), e);
                     utcb.set_msg_tag(MsgTag::err());
                     utcb.set_mr(0, e as usize);
                 }
@@ -109,55 +109,63 @@ impl<'a> SystemService for Ext4Service<'a> {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let flags = OpenFlags::from_bits_truncate(u_inner.get_mr(0));
                     let mode = u_inner.get_mr(1) as u32;
-                    let path = "mock_path"; // TODO: read path from IPC buffer
-
-                    let file_handle = fs.open_handle(badge, path, flags, mode)?;
-                    let id = s.next_handle_id;
-                    s.next_handle_id += 1;
-                    s.handles.insert(id, file_handle);
-
-                    u_inner.set_mr(0, id);
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    let file_handle = fs.open_handle(badge, &path, flags, mode)?;
+                    s.handles.insert(badge.bits(), file_handle);
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, glenda::protocol::fs::MKDIR) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let mode = u_inner.get_mr(0) as u32;
-                    let path = "mock_path";
-                    fs.mkdir(badge, path, mode)?;
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    fs.mkdir(badge, &path, mode)?;
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, glenda::protocol::fs::UNLINK) => |s: &mut Self, u: &mut UTCB| {
-                handle_call(u, |_u_inner| {
+                handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
-                    let path = "mock_path";
-                    fs.unlink(badge, path)?;
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    fs.unlink(badge, &path)?;
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, glenda::protocol::fs::STAT_PATH) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
-                    let path = "mock_path";
-                    let stat = fs.stat_path(badge, path)?;
-                    u_inner.set_mr(0, stat.size as usize);
-                    u_inner.set_mr(1, stat.mode as usize);
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    let stat = fs.stat_path(badge, &path)?;
+                    unsafe { u_inner.write_obj(&stat)? };
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, glenda::protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
-                    let id = u_inner.get_mr(0);
+                    let len = core::cmp::min(u_inner.get_mr(0), glenda::ipc::IPC_BUFFER_SIZE);
                     let offset = u_inner.get_mr(1) as usize;
-                    let len = u_inner.get_mr(2);
-                    let handle = s.handles.get_mut(&id).ok_or(Error::NotFound)?;
+                    let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
 
                     let mut buf = alloc::vec![0u8; len];
                     let read_len = handle.read(badge, offset, &mut buf)?;
-                    u_inner.set_mr(0, read_len);
-                    Ok(())
+                    u_inner.write(&buf[..read_len]);
+                    Ok(read_len)
+                })
+            },
+            (FS_PROTO, glenda::protocol::fs::WRITE_SYNC) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let offset = u_inner.get_mr(0) as usize;
+                    let payload = Vec::from(u_inner.buffer());
+                    let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
+                    let written = handle.write(badge, offset, &payload)?;
+                    Ok(written)
+                })
+            },
+            (FS_PROTO, glenda::protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |_u_inner| {
+                    s.handles.remove(&badge.bits());
+                    Ok(0usize)
                 })
             },
             (PROCESS_PROTO, process::EXIT) => |s: &mut Self, _u: &mut UTCB| {

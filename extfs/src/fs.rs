@@ -135,7 +135,8 @@ impl ExtFs {
         let table_block = gd.bg_inode_table_lo;
 
         let inode_size = self.sb.s_inode_size as usize;
-        let offset = (table_block as usize * self.block_size as usize) + (index as usize * inode_size);
+        let offset =
+            (table_block as usize * self.block_size as usize) + (index as usize * inode_size);
 
         let mut buf = [0u8; 256];
         self.reader.read_offset(offset, &mut buf)?;
@@ -348,21 +349,6 @@ impl FileHandleService for ExtFileHandle {
     }
 
     fn write(&mut self, _badge: Badge, offset: usize, buf: &[u8]) -> Result<usize, Error> {
-        // Simplified write - assumes no allocation needed for existing blocks or implementing minimal allocation is hard here without FS ref.
-        // But writes usually go through FS service for allocation?
-        // Wait, `FileHandle::write` is called on the handle. The handle needs access to allocator if extending.
-        // `ExtFileHandle` only has `read-only` ops access (get_block_addr).
-        // `ExtOps` is just for traversing maps.
-        // Real write support needs `allocator` etc.
-        // The user said: "write logic can be moved from ExtFs::write_file to here."
-        // `ExtFs::write_file` did: get_block_addr (failed if not present?), read, modify, write.
-        // It used `self.log_block`. `ExtFs` had `FileSystemJournalService`. `ExtFileHandle` does NOT have `FileSystemJournalService`.
-        // So `write` might be difficult without `ExtFs` ref.
-        // However, `log_block` calls `reader.write_blocks`.
-        // `ExtFileHandle` has `reader` so it can write blocks.
-        // But `log_block` was part of `transaction`.
-        // If I skip transaction overhead for now (as `write_file` seemed to use it just for locking/logging?), I can just write.
-
         let mut written = 0;
         let mut current_offset = offset;
         let mut buf_ptr = 0;
@@ -400,7 +386,6 @@ impl FileHandleService for ExtFileHandle {
             current_offset += chuck_len as usize;
             buf_ptr += chuck_len;
         }
-
         Ok(written)
     }
 

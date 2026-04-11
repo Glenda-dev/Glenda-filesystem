@@ -16,7 +16,6 @@ use glenda::protocol::{FS_PROTO, PROCESS_PROTO};
 pub struct FatFsService<'a> {
     fs: Option<FatFs>,
     handles: BTreeMap<usize, Box<dyn FileHandleService + Send>>,
-    next_handle_id: usize,
     endpoint: Endpoint,
     reply: Reply,
     recv: CapPtr,
@@ -40,7 +39,6 @@ impl<'a> FatFsService<'a> {
         Self {
             fs: None,
             handles: BTreeMap::new(),
-            next_handle_id: 1,
             endpoint: Endpoint::from(CapPtr::null()),
             reply: Reply::from(CapPtr::null()),
             recv: CapPtr::null(),
@@ -110,55 +108,55 @@ impl<'a> SystemService for FatFsService<'a> {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let flags = OpenFlags::from_bits_truncate(u_inner.get_mr(0));
                     let mode = u_inner.get_mr(1) as u32;
-                    let path = "mock_path"; // TODO
+                    let path = unsafe { u_inner.read_str()? };
 
-                    let handle = fs.open_handle(path, flags, mode)?;
-                    let id = s.next_handle_id;
-                    s.next_handle_id += 1;
-                    s.handles.insert(id, handle);
-                    u_inner.set_mr(0, id);
-                    Ok(())
+                    let handle = fs.open_handle(&path, flags, mode)?;
+                    s.handles.insert(badge.bits(), handle);
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, protocol::fs::MKDIR) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
                     let mode = u_inner.get_mr(0) as u32;
-                    let path = "mock_path";
-                    fs.mkdir(path, mode)?;
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    fs.mkdir(&path, mode)?;
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, protocol::fs::UNLINK) => |s: &mut Self, u: &mut UTCB| {
-                handle_call(u, |_u_inner| {
+                handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
-                    let path = "mock_path";
-                    fs.unlink(path)?;
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    fs.unlink(&path)?;
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, protocol::fs::STAT_PATH) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
-                    let path = "mock_path";
-                    let stat = fs.stat_path(path)?;
-                    u_inner.set_mr(0, stat.size as usize);
-                    u_inner.set_mr(1, stat.mode as usize);
-                    Ok(())
+                    let path = unsafe { u_inner.read_str()? };
+                    let stat = fs.stat_path(&path)?;
+                    unsafe { u_inner.write_obj(&stat)? };
+                    Ok(0usize)
                 })
             },
             (FS_PROTO, protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
-                    let id = u_inner.get_mr(0);
+                    let len = u_inner.get_mr(0);
                     let offset = u_inner.get_mr(1) as usize;
-                    let len = u_inner.get_mr(2);
-                    let handle = s.handles.get_mut(&id).ok_or(Error::NotFound)?;
+                    let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
 
                     let mut buf = alloc::vec![0u8; len];
                     let read_len = handle.read(badge, offset, &mut buf)?;
-                    u_inner.set_mr(0, read_len);
-                    // TODO: copy buffer to UTCB or shared memory
-                    Ok(())
+                    u_inner.write(&buf[..read_len]);
+                    Ok(read_len)
+                })
+            },
+            (FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |_u_inner| {
+                    s.handles.remove(&badge.bits());
+                    Ok(0usize)
                 })
             },
             (PROCESS_PROTO, protocol::process::EXIT) => |s: &mut Self, _u: &mut UTCB| {
