@@ -6,6 +6,7 @@ use crate::versions::ext2::Ext2Ops;
 use crate::versions::ext3::Ext3Ops;
 use crate::versions::ext4::Ext4Ops;
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::slice;
@@ -34,6 +35,9 @@ use glenda::client::ResourceClient;
 use glenda::interface::ResourceService;
 
 impl ExtFs {
+    const S_IFMT: u16 = 0xF000;
+    const S_IFLNK: u16 = 0xA000;
+
     pub fn new(
         block_device: Endpoint,
         ring_vaddr: usize,
@@ -147,6 +151,42 @@ impl ExtFs {
 
     fn get_block_addr(&self, inode: &Inode, lblock: u32) -> Result<u32, Error> {
         self.ops.get_block_addr(&self.reader, inode, lblock, self.block_size)
+    }
+
+    fn is_symlink_inode(&self, inode: &Inode) -> bool {
+        (inode.i_mode & Self::S_IFMT) == Self::S_IFLNK
+    }
+
+    fn read_inode_payload(&self, inode: &Inode) -> Result<Vec<u8>, Error> {
+        let size = inode.i_size_lo as usize;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        if self.is_symlink_inode(inode) && size <= inode.i_block.len() && inode.i_blocks_lo == 0 {
+            return Ok(inode.i_block[..size].to_vec());
+        }
+
+        let mut out = alloc::vec![0u8; size];
+        let mut copied = 0usize;
+        while copied < size {
+            let lblock = (copied / self.block_size as usize) as u32;
+            let pblock = self.get_block_addr(inode, lblock)?;
+            let block_off = copied % self.block_size as usize;
+            let chunk_len = core::cmp::min(size - copied, self.block_size as usize - block_off);
+
+            if pblock != 0 {
+                let mut block_data = alloc::vec![0u8; self.block_size as usize];
+                let read_offset = pblock as usize * self.block_size as usize;
+                self.reader.read_offset(read_offset, &mut block_data)?;
+                out[copied..copied + chunk_len]
+                    .copy_from_slice(&block_data[block_off..block_off + chunk_len]);
+            }
+
+            copied += chunk_len;
+        }
+
+        Ok(out)
     }
 
     fn resolve_path(&self, path: &str) -> Result<u32, Error> {
@@ -276,6 +316,29 @@ impl ExtFs {
             mode: inode.i_mode as u32,
             ..Default::default()
         })
+    }
+
+    pub fn lstat_path(&mut self, _badge: Badge, path: &str) -> Result<Stat, Error> {
+        let ino = self.resolve_path(path)?;
+        let inode = self.read_inode(ino)?;
+        Ok(Stat {
+            ino: ino as usize,
+            size: inode.i_size_lo as usize,
+            mode: inode.i_mode as u32,
+            ..Default::default()
+        })
+    }
+
+    pub fn readlink_path(&mut self, _badge: Badge, path: &str) -> Result<String, Error> {
+        let ino = self.resolve_path(path)?;
+        let inode = self.read_inode(ino)?;
+        if !self.is_symlink_inode(&inode) {
+            return Err(Error::InvalidType);
+        }
+
+        let target = self.read_inode_payload(&inode)?;
+        let target = core::str::from_utf8(&target).map_err(|_| Error::InvalidType)?;
+        Ok(String::from(target))
     }
 }
 

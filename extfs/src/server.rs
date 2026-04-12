@@ -141,6 +141,24 @@ impl<'a> SystemService for Ext4Service<'a> {
                     Ok(0usize)
                 })
             },
+            (FS_PROTO, glenda::protocol::fs::LSTAT_PATH) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
+                    let path = unsafe { u_inner.read_str()? };
+                    let stat = fs.lstat_path(badge, &path)?;
+                    unsafe { u_inner.write_obj(&stat)? };
+                    Ok(0usize)
+                })
+            },
+            (FS_PROTO, glenda::protocol::fs::READLINK_PATH) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
+                    let path = unsafe { u_inner.read_str()? };
+                    let target = fs.readlink_path(badge, &path)?;
+                    unsafe { u_inner.write_str(&target)? };
+                    Ok(0usize)
+                })
+            },
             (FS_PROTO, glenda::protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let len = core::cmp::min(u_inner.get_mr(0), glenda::ipc::IPC_BUFFER_SIZE);
