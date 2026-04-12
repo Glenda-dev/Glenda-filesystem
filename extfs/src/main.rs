@@ -50,8 +50,9 @@ fn main() -> usize {
         .get_device(Badge::null(), DEVICE_SLOT)
         .expect("ExtFS: Failed to get block device");
 
-    let mut service = Ext4Service::new(RING_VADDR, RING_SIZE, &mut cspace, &mut vspace);
-    service.init_fs(block_device, &mut res_client).expect("Failed to init ExtFS");
+    let mut service =
+        Ext4Service::new(RING_VADDR, RING_SIZE, &mut res_client, &mut cspace, &mut vspace);
+    service.init_fs(block_device).expect("Failed to init ExtFS");
 
     service
         .listen(ENDPOINT_CAP, REPLY_SLOT, RECV_SLOT)
