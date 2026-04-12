@@ -3,7 +3,6 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use glenda::cap::{CapPtr, Endpoint, Reply};
 use glenda::client::ResourceClient;
-use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
 use glenda::interface::system::SystemService;
@@ -12,6 +11,7 @@ use glenda::ipc::{MsgTag, UTCB};
 use glenda::protocol;
 use glenda::protocol::fs::OpenFlags;
 use glenda::protocol::{FS_PROTO, PROCESS_PROTO};
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 pub struct FatFsService<'a> {
     fs: Option<FatFs>,
@@ -147,9 +147,12 @@ impl<'a> SystemService for FatFsService<'a> {
                     let offset = u_inner.get_mr(1) as usize;
                     let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
 
-                    let mut buf = alloc::vec![0u8; len];
-                    let read_len = handle.read(badge, offset, &mut buf)?;
-                    u_inner.write(&buf[..read_len]);
+                    let read_len = {
+                        let cap = core::cmp::min(len, u_inner.buffer_mut().len());
+                        let buf = u_inner.buffer_mut();
+                        handle.read(badge, offset, &mut buf[..cap])?
+                    };
+                    u_inner.set_size(read_len);
                     Ok(read_len)
                 })
             },

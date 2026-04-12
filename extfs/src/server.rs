@@ -1,7 +1,6 @@
 use crate::fs::ExtFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use glenda::cap::{CapPtr, Endpoint, Reply};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
@@ -165,18 +164,19 @@ impl<'a> SystemService for Ext4Service<'a> {
                     let offset = u_inner.get_mr(1) as usize;
                     let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
 
-                    let mut buf = alloc::vec![0u8; len];
-                    let read_len = handle.read(badge, offset, &mut buf)?;
-                    u_inner.write(&buf[..read_len]);
+                    let read_len = {
+                        let buf = u_inner.buffer_mut();
+                        handle.read(badge, offset, &mut buf[..len])?
+                    };
+                    u_inner.set_size(read_len);
                     Ok(read_len)
                 })
             },
             (FS_PROTO, glenda::protocol::fs::WRITE_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let offset = u_inner.get_mr(0) as usize;
-                    let payload = Vec::from(u_inner.buffer());
                     let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
-                    let written = handle.write(badge, offset, &payload)?;
+                    let written = handle.write(badge, offset, u_inner.buffer())?;
                     Ok(written)
                 })
             },
