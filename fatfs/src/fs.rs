@@ -6,6 +6,7 @@ use crate::versions::Fat16Ops;
 use crate::versions::Fat32Ops;
 use crate::versions::{ExFatBpb, ExFatOps};
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use glenda::cap::{Endpoint, Frame};
@@ -27,6 +28,9 @@ pub struct FatFs {
 }
 
 impl FatFs {
+    const S_IFDIR: u32 = 0o040000;
+    const S_IFREG: u32 = 0o100000;
+
     pub fn new(
         block_device: Endpoint,
         ring_vaddr: usize,
@@ -155,7 +159,8 @@ impl FatFs {
 
     pub fn read_cluster(&self, cluster: u32, buf: &mut [u8]) -> Result<(), Error> {
         let sector = self.ops.cluster_to_sector(cluster);
-        let size = (self.ops.sectors_per_cluster() as usize) * (self.ops.bytes_per_sector() as usize);
+        let size =
+            (self.ops.sectors_per_cluster() as usize) * (self.ops.bytes_per_sector() as usize);
         if buf.len() < size as usize {
             return Err(Error::MessageTooLong);
         }
@@ -326,6 +331,14 @@ impl FatFs {
 
         Ok(current_entry)
     }
+
+    fn entry_mode(entry: &DirEntry) -> u32 {
+        if (entry.attr & ATTR_DIRECTORY) != 0 {
+            Self::S_IFDIR | 0o755
+        } else {
+            Self::S_IFREG | 0o644
+        }
+    }
 }
 
 impl FatFs {
@@ -371,8 +384,21 @@ impl FatFs {
         let entry = self.lookup(path)?;
         let mut stat = Stat::default();
         stat.size = entry.file_size as usize;
-        stat.mode = if (entry.attr & 0x10) != 0 { 0o040755 } else { 0o100644 };
+        stat.mode = Self::entry_mode(&entry);
         Ok(stat)
+    }
+
+    pub fn lstat_path(&mut self, path: &str) -> Result<Stat, Error> {
+        // FAT does not support symbolic links in this implementation.
+        // Keep behavior aligned with stat_path.
+        self.stat_path(path)
+    }
+
+    pub fn readlink_path(&mut self, _path: &str) -> Result<String, Error> {
+        // Keep lookup behavior consistent with other path APIs: missing path -> NotFound.
+        let _ = self.lookup(_path)?;
+        // FAT/exFAT backend currently has no symlink inode/reparse handling.
+        Err(Error::InvalidType)
     }
 
     pub fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<(), Error> {
@@ -428,8 +454,8 @@ impl FatFileHandle {
             let chunk_len = core::cmp::min(remaining, bytes_left_in_cluster);
 
             let cluster_start_sector = self.ops.cluster_to_sector(current_cluster);
-            let abs_offset =
-                cluster_start_sector * (self.ops.bytes_per_sector() as usize) + cluster_offset as usize;
+            let abs_offset = cluster_start_sector * (self.ops.bytes_per_sector() as usize)
+                + cluster_offset as usize;
 
             self.reader.read_shm(abs_offset, chunk_len as u32, current_shm_vaddr)?;
 

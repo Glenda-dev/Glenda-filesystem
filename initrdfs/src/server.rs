@@ -170,6 +170,30 @@ impl<'a> SystemService for InitrdServer<'a> {
                     }
                 })
             },
+            (protocol::FS_PROTO, protocol::fs::LSTAT_PATH) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let path = core::str::from_utf8(u_inner.buffer()).map_err(|_| Error::InvalidArgs)?;
+                    if let Some(fs) = &mut s.fs {
+                        let stat = fs.lstat(path)?;
+                        unsafe { u_inner.write_obj(&stat) }.map_err(|_| Error::Unknown)?;
+                        Ok(())
+                    } else {
+                        Err(Error::NotInitialized)
+                    }
+                })
+            },
+            (protocol::FS_PROTO, protocol::fs::READLINK_PATH) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let path = core::str::from_utf8(u_inner.buffer()).map_err(|_| Error::InvalidArgs)?;
+                    if let Some(fs) = &mut s.fs {
+                        let target = fs.readlink(path)?;
+                        unsafe { u_inner.write_str(&target) }.map_err(|_| Error::Unknown)?;
+                        Ok(())
+                    } else {
+                        Err(Error::NotInitialized)
+                    }
+                })
+            },
             (protocol::FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
                     if let Some(_handle) = s.open_files.remove(&badge_bits) {

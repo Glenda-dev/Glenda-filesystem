@@ -1,11 +1,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use glenda::cap::Frame;
+use glenda::client::volume::VolumeClient;
 use glenda::error::Error;
 use glenda::io::uring::IoUringBuffer;
 use glenda::ipc::Badge;
 use glenda::protocol::fs::{OpenFlags, Stat};
-use glenda::client::volume::VolumeClient;
 
 pub const DEFAULT_STAT: u32 = 0o100444;
 
@@ -251,5 +251,14 @@ impl InitrdFS {
             }
         }
         Err(Error::NotFound)
+    }
+
+    pub fn lstat(&self, path: &str) -> Result<Stat, Error> {
+        // initrd entries are regular files/directories only in current format.
+        self.stat(path)
+    }
+
+    pub fn readlink(&self, _path: &str) -> Result<String, Error> {
+        Err(Error::InvalidType)
     }
 }
