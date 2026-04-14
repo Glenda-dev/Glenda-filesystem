@@ -116,7 +116,6 @@ impl<'a> SystemService for Ext4Service<'a> {
 
             if self.endpoint.recv(&mut utcb).is_ok() {
                 if let Err(e) = self.dispatch(&mut utcb) {
-                    error!("ExtFS dispatch failed: badge={}, err={:?}", utcb.get_badge().bits(), e);
                     utcb.set_msg_tag(MsgTag::err());
                     utcb.set_mr(0, e as usize);
                 }
@@ -139,14 +138,6 @@ impl<'a> SystemService for Ext4Service<'a> {
                     let handle_id = Self::handle_id_from_badge(badge);
                     let file_handle = fs.open_handle(badge, &path, flags, mode)?;
                     s.handles.insert(handle_id, file_handle);
-                    log!(
-                        "extfs open: badge={:#x}, handle_id={}, path={}, flags={:?}, mode={:#o}",
-                        badge.bits(),
-                        handle_id,
-                        path,
-                        flags,
-                        mode
-                    );
                     Ok(0usize)
                 })
             },
@@ -199,13 +190,6 @@ impl<'a> SystemService for Ext4Service<'a> {
                     let len = core::cmp::min(u_inner.get_mr(0), glenda::ipc::IPC_BUFFER_SIZE);
                     let offset = u_inner.get_mr(1) as usize;
                     let handle_id = Self::handle_id_from_badge(badge);
-                    log!(
-                        "extfs read: badge={:#x}, handle_id={}, offset={}, len={}",
-                        badge.bits(),
-                        handle_id,
-                        offset,
-                        len
-                    );
                     let handle = s.handles.get_mut(&handle_id).ok_or(Error::NotFound)?;
 
                     let read_len = {
@@ -229,7 +213,6 @@ impl<'a> SystemService for Ext4Service<'a> {
                 handle_call(u, |_u_inner| {
                     let handle_id = Self::handle_id_from_badge(badge);
                     s.handles.remove(&handle_id);
-                    debug!("close: badge={:#x}, handle_id={}", badge.bits(), handle_id);
                     Ok(0usize)
                 })
             },
