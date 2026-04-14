@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt::Write;
 use core::slice;
 use glenda::cap::{Endpoint, Frame};
 use glenda::error::Error;
@@ -37,6 +38,57 @@ use glenda::interface::ResourceService;
 impl ExtFs {
     const S_IFMT: u16 = 0xF000;
     const S_IFLNK: u16 = 0xA000;
+
+    fn fs_kind(sb: &SuperBlock) -> &'static str {
+        let feature_incompat = sb.s_feature_incompat;
+        let feature_compat = sb.s_feature_compat;
+
+        if (feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0 {
+            "ext4"
+        } else if (feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) != 0 {
+            "ext3"
+        } else {
+            "ext2"
+        }
+    }
+
+    fn decode_cstr(bytes: &[u8]) -> String {
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from(String::from_utf8_lossy(&bytes[..end]).trim())
+    }
+
+    fn format_uuid(uuid: [u8; 16]) -> String {
+        let mut out = String::with_capacity(36);
+        for (idx, b) in uuid.iter().enumerate() {
+            if matches!(idx, 4 | 6 | 8 | 10) {
+                out.push('-');
+            }
+            let _ = write!(&mut out, "{:02x}", b);
+        }
+        out
+    }
+
+    fn block_count(sb: &SuperBlock) -> u64 {
+        let lo = sb.s_blocks_count_lo as u64;
+        let hi = sb.s_blocks_count_hi as u64;
+        let feature_incompat = sb.s_feature_incompat;
+        if (feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            (hi << 32) | lo
+        } else {
+            lo
+        }
+    }
+
+    fn free_block_count(sb: &SuperBlock) -> u64 {
+        let lo = sb.s_free_blocks_count_lo as u64;
+        let hi = sb.s_free_blocks_count_hi as u64;
+        let feature_incompat = sb.s_feature_incompat;
+        if (feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            (hi << 32) | lo
+        } else {
+            lo
+        }
+    }
 
     pub fn new(
         block_device: Endpoint,
@@ -101,6 +153,66 @@ impl ExtFs {
             // log!("Detected Ext2");
             Arc::new(Ext2Ops)
         };
+
+        let fs_kind = Self::fs_kind(&sb);
+        let volume_name_raw = sb.s_volume_name;
+        let volume_name = Self::decode_cstr(&volume_name_raw);
+        let volume_name = if volume_name.is_empty() { "<unnamed>" } else { volume_name.as_str() };
+        let uuid_raw = sb.s_uuid;
+        let volume_uuid = Self::format_uuid(uuid_raw);
+
+        let inode_size = sb.s_inode_size;
+        let inodes_count = sb.s_inodes_count;
+        let free_inodes_count = sb.s_free_inodes_count;
+        let blocks_per_group = sb.s_blocks_per_group;
+        let inodes_per_group = sb.s_inodes_per_group;
+        let feature_compat = sb.s_feature_compat;
+        let feature_incompat = sb.s_feature_incompat;
+        let feature_ro_compat = sb.s_feature_ro_compat;
+        let blocks_count = Self::block_count(&sb);
+        let free_blocks_count = Self::free_block_count(&sb);
+        let first_data_block = sb.s_first_data_block;
+        let group_count =
+            if blocks_per_group == 0 { 0 } else { blocks_count.div_ceil(blocks_per_group as u64) };
+        let fs_state = sb.s_state;
+        let rev_level = sb.s_rev_level;
+        let mnt_count = sb.s_mnt_count;
+        let max_mnt_count = sb.s_max_mnt_count;
+        let mkfs_time = sb.s_mkfs_time;
+        let last_mount_time = sb.s_mtime;
+        let last_write_time = sb.s_wtime;
+        let last_mounted_raw = sb.s_last_mounted;
+        let last_mounted = Self::decode_cstr(&last_mounted_raw);
+        let last_mounted =
+            if last_mounted.is_empty() { "<unknown>" } else { last_mounted.as_str() };
+
+        log!("mounted {} label=\"{}\" uuid={}", fs_kind, volume_name, volume_uuid);
+        log!("block_size={} inode_size={} inodes={} blocks={} free_blocks={} free_inodes={} blocks_per_group={} inodes_per_group={} desc_size={} features(c=0x{:08x},i=0x{:08x},ro=0x{:08x})",
+            block_size,
+            inode_size,
+            inodes_count,
+            blocks_count,
+            free_blocks_count,
+            free_inodes_count,
+            blocks_per_group,
+            inodes_per_group,
+            group_desc_size,
+            feature_compat,
+            feature_incompat,
+            feature_ro_compat
+        );
+        log!("metadata first_data_block={} block_groups={} rev={} state=0x{:04x} mount_count={}/{} mkfs_time={} last_mount_time={} last_write_time={} last_mounted=\"{}\"",
+            first_data_block,
+            group_count,
+            rev_level,
+            fs_state,
+            mnt_count,
+            max_mnt_count,
+            mkfs_time,
+            last_mount_time,
+            last_write_time,
+            last_mounted,
+        );
 
         Ok(Self {
             reader,
