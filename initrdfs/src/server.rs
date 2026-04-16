@@ -1,5 +1,5 @@
 use alloc::collections::BTreeMap;
-use glenda::cap::{CapPtr, Endpoint, Frame, Reply, CSPACE_CAP, RECV_SLOT};
+use glenda::cap::{CapPtr, Endpoint, Page, Reply, CSPACE_CAP, RECV_SLOT};
 use glenda::client::volume::VolumeClient;
 use glenda::client::{FsClient, ResourceClient};
 use glenda::error::Error;
@@ -79,7 +79,7 @@ impl<'a> SystemService for InitrdServer<'a> {
             size: 4096,
         };
         let shm_params = ShmParams {
-            frame: Frame::from(CapPtr::null()),
+            frame: Page::from(CapPtr::null()),
             vaddr: shm_vaddr,
             paddr: 0,
             size: 0,
@@ -235,7 +235,7 @@ impl<'a> SystemService for InitrdServer<'a> {
                     let frame = if u_inner.get_msg_tag().flags().contains(MsgFlags::HAS_CAP) {
                         let slot = s.cspace.alloc(s.res_client)?;
                         CSPACE_CAP.transfer_self(RECV_SLOT, slot)?;
-                        Some(Frame::from(slot))
+                        Some(Page::from(slot))
                     } else {
                         None
                     };
@@ -244,7 +244,7 @@ impl<'a> SystemService for InitrdServer<'a> {
                     s.next_vaddr += size;
 
                     if let Some(f) = frame {
-                        s.vspace.map_frame(
+                        s.vspace.map_page(
                             f,
                             addr_server,
                             glenda::mem::Perms::READ | glenda::mem::Perms::WRITE,

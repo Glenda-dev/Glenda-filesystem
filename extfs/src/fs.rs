@@ -11,7 +11,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use core::slice;
-use glenda::cap::{Endpoint, Frame};
+use glenda::cap::{Endpoint, Page};
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
 use glenda::interface::fs::FileSystemJournalService;
@@ -117,7 +117,7 @@ impl ExtFs {
         };
 
         let shm_params = ShmParams {
-            frame: Frame::from(glenda::cap::CapPtr::null()),
+            frame: Page::from(glenda::cap::CapPtr::null()),
             vaddr: 0,
             size: 0,
             paddr: 0,

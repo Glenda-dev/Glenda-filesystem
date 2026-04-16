@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use glenda::cap::{Endpoint, Frame};
+use glenda::cap::{Endpoint, Page};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
@@ -58,7 +58,7 @@ impl FatFs {
         };
 
         let shm_params = ShmParams {
-            frame: Frame::from(glenda::cap::CapPtr::null()),
+            frame: Page::from(glenda::cap::CapPtr::null()),
             vaddr: 0,
             size: 0,
             paddr: 0,

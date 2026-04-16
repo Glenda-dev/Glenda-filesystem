@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use glenda::cap::Frame;
+use glenda::cap::Page;
 use glenda::client::volume::VolumeClient;
 use glenda::error::Error;
 use glenda::io::uring::IoUringBuffer;
@@ -83,7 +83,7 @@ impl InitrdFile {
         server_vaddr: usize,
         user_vaddr: usize,
         size: usize,
-        frame: Option<Frame>,
+        frame: Option<Page>,
     ) -> Result<(), Error> {
         self.server_shm_base = server_vaddr;
         self.user_shm_base = user_vaddr;
