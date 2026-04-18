@@ -501,16 +501,25 @@ impl FileHandleService for ExtFileHandle {
             let chuck_len =
                 core::cmp::min(buf.len() - buf_ptr, self.block_size as usize - blk_offset_in_buf);
 
-            let mut block_data = alloc::vec![0u8; self.block_size as usize];
-            if pblock != 0 {
-                let read_offset = pblock as usize * self.block_size as usize;
-                self.reader.read_offset(read_offset, &mut block_data)?;
+            if chuck_len == self.block_size as usize {
+                if pblock != 0 {
+                    let read_offset = pblock as usize * self.block_size as usize;
+                    self.reader.read_offset(read_offset, &mut buf[buf_ptr..buf_ptr + chuck_len])?;
+                } else {
+                    buf[buf_ptr..buf_ptr + chuck_len].fill(0);
+                }
             } else {
-                // Sparse block, zeroed
-            }
+                let mut block_data = alloc::vec![0u8; self.block_size as usize];
+                if pblock != 0 {
+                    let read_offset = pblock as usize * self.block_size as usize;
+                    self.reader.read_offset(read_offset, &mut block_data)?;
+                } else {
+                    // Sparse block, zeroed
+                }
 
-            buf[buf_ptr..buf_ptr + chuck_len]
-                .copy_from_slice(&block_data[blk_offset_in_buf..blk_offset_in_buf + chuck_len]);
+                buf[buf_ptr..buf_ptr + chuck_len]
+                    .copy_from_slice(&block_data[blk_offset_in_buf..blk_offset_in_buf + chuck_len]);
+            }
 
             read_len += chuck_len;
             current_offset += chuck_len as usize;
@@ -544,18 +553,23 @@ impl FileHandleService for ExtFileHandle {
             let chuck_len =
                 core::cmp::min(buf.len() - buf_ptr, self.block_size as usize - blk_offset_in_buf);
 
-            // Read
-            let mut block_data = alloc::vec![0u8; self.block_size as usize];
             let read_offset = pblock as usize * self.block_size as usize;
-            self.reader.read_offset(read_offset, &mut block_data)?;
+            let device_block_addr = pblock as usize * (self.block_size / 512) as usize;
 
-            // Modify
-            block_data[blk_offset_in_buf..blk_offset_in_buf + chuck_len]
-                .copy_from_slice(&buf[buf_ptr..buf_ptr + chuck_len]);
+            if chuck_len == self.block_size as usize {
+                self.reader.write_blocks(device_block_addr, &buf[buf_ptr..buf_ptr + chuck_len])?;
+            } else {
+                // Read
+                let mut block_data = alloc::vec![0u8; self.block_size as usize];
+                self.reader.read_offset(read_offset, &mut block_data)?;
 
-            // Write
-            self.reader
-                .write_blocks(pblock as usize * (self.block_size / 512) as usize, &block_data)?;
+                // Modify
+                block_data[blk_offset_in_buf..blk_offset_in_buf + chuck_len]
+                    .copy_from_slice(&buf[buf_ptr..buf_ptr + chuck_len]);
+
+                // Write
+                self.reader.write_blocks(device_block_addr, &block_data)?;
+            }
 
             written += chuck_len;
             current_offset += chuck_len as usize;

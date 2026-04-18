@@ -1,7 +1,7 @@
 use crate::fs::FatFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use glenda::cap::{CapPtr, Endpoint, Reply};
+use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
@@ -26,8 +26,6 @@ pub struct FatFsService<'a> {
     pub cspace: &'a mut CSpaceManager,
     pub vspace: &'a mut VSpaceManager,
 }
-
-const RECV_SLOT: CapPtr = CapPtr::from(0x100);
 
 impl<'a> FatFsService<'a> {
     pub fn new(
@@ -66,6 +64,19 @@ impl<'a> FatFsService<'a> {
         )?);
         Ok(())
     }
+
+    fn caller_badge_from_badge(badge: glenda::ipc::Badge) -> glenda::ipc::Badge {
+        if usize::BITS > 32 {
+            let hi = badge.bits() >> 32;
+            if hi != 0 {
+                glenda::ipc::Badge::new(badge.bits() & 0xffff_ffffusize)
+            } else {
+                badge
+            }
+        } else {
+            badge
+        }
+    }
 }
 
 impl<'a> SystemService for FatFsService<'a> {
@@ -83,10 +94,14 @@ impl<'a> SystemService for FatFsService<'a> {
     fn run(&mut self) -> Result<(), Error> {
         self.running = true;
         while self.running {
+            if !self.recv.is_null() {
+                // recv_window 必须为空；否则下一次带 cap 的 IPC 会在内核插入时失败。
+                let _ = CSPACE_CAP.delete(self.recv);
+            }
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
             utcb.set_reply_window(self.reply.cap());
-            utcb.set_recv_window(RECV_SLOT);
+            utcb.set_recv_window(self.recv);
 
             if self.endpoint.recv(&mut utcb).is_ok() {
                 if let Err(e) = self.dispatch(&mut utcb) {
@@ -101,6 +116,7 @@ impl<'a> SystemService for FatFsService<'a> {
 
     fn dispatch(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
         let badge = utcb.get_badge();
+        let caller_badge = Self::caller_badge_from_badge(badge);
         glenda::ipc_dispatch! {
             self, utcb,
             (FS_PROTO, protocol::fs::OPEN) => |s: &mut Self, u: &mut UTCB| {
@@ -168,12 +184,82 @@ impl<'a> SystemService for FatFsService<'a> {
                     let read_len = {
                         let cap = core::cmp::min(len, u_inner.buffer_mut().len());
                         let buf = u_inner.buffer_mut();
-                        handle.read(badge, offset, &mut buf[..cap])?
+                        handle.read(caller_badge, offset, &mut buf[..cap])?
                     };
                     u_inner.set_size(read_len);
                     Ok(read_len)
                 })
             },
+                (FS_PROTO, protocol::fs::WRITE_SYNC) => |s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |u_inner| {
+                        let offset = u_inner.get_mr(0) as usize;
+                        let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
+                        let written = handle.write(caller_badge, offset, u_inner.buffer())?;
+                        Ok(written)
+                    })
+                },
+                (FS_PROTO, protocol::fs::STAT) => |s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |u_inner| {
+                        let handle = s.handles.get(&badge.bits()).ok_or(Error::NotFound)?;
+                        let stat = handle.stat(caller_badge)?;
+                        unsafe { u_inner.write_obj(&stat)? };
+                        Ok(0usize)
+                    })
+                },
+                (FS_PROTO, protocol::fs::GETDENTS) => |s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |u_inner| {
+                        let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
+                        let count = if u_inner.get_mr(1) != 0 {
+                            u_inner.get_mr(1)
+                        } else {
+                            u_inner.get_mr(0)
+                        };
+                        let _ = handle.getdents(caller_badge, count)?;
+                        Err::<usize, Error>(Error::NotSupported)
+                    })
+                },
+                (FS_PROTO, protocol::fs::SEEK) => |s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |u_inner| {
+                        let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
+                        let (offset, whence) = if u_inner.get_mr(2) != 0 || u_inner.get_mr(1) != 0 {
+                            (u_inner.get_mr(1) as i64, u_inner.get_mr(2))
+                        } else {
+                            (u_inner.get_mr(0) as i64, u_inner.get_mr(1))
+                        };
+                        let pos = handle.seek(caller_badge, offset, whence)?;
+                        Ok(pos)
+                    })
+                },
+                (FS_PROTO, protocol::fs::SYNC) => |s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |_u_inner| {
+                        let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
+                        handle.sync(caller_badge)?;
+                        Ok(0usize)
+                    })
+                },
+                (FS_PROTO, protocol::fs::TRUNCATE) => |s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |u_inner| {
+                        let handle = s.handles.get_mut(&badge.bits()).ok_or(Error::NotFound)?;
+                        let size = if u_inner.get_mr(1) != 0 {
+                            u_inner.get_mr(1)
+                        } else {
+                            u_inner.get_mr(0)
+                        };
+                        handle.truncate(caller_badge, size)?;
+                        Ok(0usize)
+                    })
+                },
+                (FS_PROTO, protocol::fs::SETUP_IOURING) => |_s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |_u_inner| {
+                        let _ = CSPACE_CAP.delete(_s.recv);
+                        Err::<usize, Error>(Error::NotSupported)
+                    })
+                },
+                (FS_PROTO, protocol::fs::PROCESS_IOURING) => |_s: &mut Self, u: &mut UTCB| {
+                    handle_call(u, |_u_inner| {
+                        Err::<usize, Error>(Error::NotSupported)
+                    })
+                },
             (FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
                     s.handles.remove(&badge.bits());
@@ -183,6 +269,9 @@ impl<'a> SystemService for FatFsService<'a> {
             (PROCESS_PROTO, protocol::process::EXIT) => |s: &mut Self, _u: &mut UTCB| {
                 s.running = false;
                 Ok(())
+                },
+                (_, _) => |_s: &mut Self, _u: &mut UTCB| {
+                    Err(Error::NotSupported)
             }
         }
     }

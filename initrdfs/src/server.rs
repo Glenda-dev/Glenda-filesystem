@@ -24,7 +24,6 @@ pub struct InitrdServer<'a> {
     vfs_client: &'a mut FsClient,
     fs: Option<InitrdFS>,
     open_files: BTreeMap<usize, crate::fs::InitrdFile>,
-    next_badge: usize,
     next_vaddr: usize,
     endpoint: Endpoint,
     reply: Reply,
@@ -49,7 +48,6 @@ impl<'a> InitrdServer<'a> {
             vfs_client,
             fs: None,
             open_files: BTreeMap::new(),
-            next_badge: 1,
             next_vaddr: 0x4000_0000,
             endpoint: Endpoint::from(CapPtr::null()),
             reply: Reply::from(CapPtr::null()),
@@ -57,6 +55,28 @@ impl<'a> InitrdServer<'a> {
             running: false,
             cspace,
             vspace,
+        }
+    }
+
+    fn handle_id_from_badge(badge: Badge) -> usize {
+        if usize::BITS > 32 {
+            let hi = badge.bits() >> 32;
+            if hi != 0 { hi } else { badge.bits() }
+        } else {
+            badge.bits()
+        }
+    }
+
+    fn caller_badge_from_badge(badge: Badge) -> Badge {
+        if usize::BITS > 32 {
+            let hi = badge.bits() >> 32;
+            if hi != 0 {
+                Badge::new(badge.bits() & 0xffff_ffffusize)
+            } else {
+                badge
+            }
+        } else {
+            badge
         }
     }
 }
@@ -138,7 +158,8 @@ impl<'a> SystemService for InitrdServer<'a> {
 
     fn dispatch(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
         let badge = utcb.get_badge();
-        let badge_bits = badge.bits();
+        let handle_id = Self::handle_id_from_badge(badge);
+        let caller_badge = Self::caller_badge_from_badge(badge);
         glenda::ipc_dispatch! {
             self, utcb,
             (protocol::FS_PROTO, protocol::fs::OPEN) => |s: &mut Self, u: &mut UTCB| {
@@ -149,10 +170,8 @@ impl<'a> SystemService for InitrdServer<'a> {
 
                     if let Some(fs) = &mut s.fs {
                         let handle = fs.open_handle(path, flags, mode)?;
-                        let badge = s.next_badge;
-                        s.next_badge += 1;
-                        s.open_files.insert(badge, handle);
-                        Ok(badge)
+                        s.open_files.insert(handle_id, handle);
+                        Ok(handle_id)
                     } else {
                         Err(Error::NotInitialized)
                     }
@@ -196,7 +215,7 @@ impl<'a> SystemService for InitrdServer<'a> {
             },
             (protocol::FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
-                    if let Some(_handle) = s.open_files.remove(&badge_bits) {
+                    if let Some(_handle) = s.open_files.remove(&handle_id) {
                         Ok(())
                     } else {
                         Err(Error::InvalidArgs)
@@ -205,8 +224,8 @@ impl<'a> SystemService for InitrdServer<'a> {
             },
             (protocol::FS_PROTO, protocol::fs::STAT) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
-                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
-                    let stat = handle.stat(badge)?;
+                    let handle = s.open_files.get_mut(&handle_id).ok_or(Error::InvalidArgs)?;
+                    let stat = handle.stat(caller_badge)?;
                     unsafe { u_inner.write_obj(&stat) }.map_err(|_| Error::Unknown)?;
                     Ok(())
                 })
@@ -214,21 +233,22 @@ impl<'a> SystemService for InitrdServer<'a> {
             (protocol::FS_PROTO, protocol::fs::READ_SYNC) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let blk_client = s.blk_client.as_ref().ok_or(Error::NotInitialized)?;
-                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
+                    let handle = s.open_files.get_mut(&handle_id).ok_or(Error::InvalidArgs)?;
                     let len = u_inner.get_mr(0);
                     let offset = u_inner.get_mr(1) as usize;
                     let buf = u_inner.buffer_mut();
                     if len > buf.len() {
                         return Err(Error::InvalidArgs);
                     }
-                    let read_len = handle.read(blk_client, badge, offset, &mut buf[..len])?;
+                    let read_len =
+                        handle.read(blk_client, caller_badge, offset, &mut buf[..len])?;
                     Ok(read_len)
                 })
             },
             (protocol::FS_PROTO, protocol::fs::SETUP_IOURING) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let blk_client = s.blk_client.as_mut().ok_or(Error::NotInitialized)?;
-                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
+                    let handle = s.open_files.get_mut(&handle_id).ok_or(Error::InvalidArgs)?;
                     let addr_user = u_inner.get_mr(1);
                     let size = u_inner.get_mr(2);
 
@@ -254,15 +274,22 @@ impl<'a> SystemService for InitrdServer<'a> {
                         )?;
                     }
 
-                    handle.setup_iouring(blk_client, badge, addr_server, addr_user, size, frame)?;
+                    handle.setup_iouring(
+                        blk_client,
+                        caller_badge,
+                        addr_server,
+                        addr_user,
+                        size,
+                        frame,
+                    )?;
                     Ok(())
                 })
             },
             (protocol::FS_PROTO, protocol::fs::PROCESS_IOURING) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
                     let blk_client = s.blk_client.as_ref().ok_or(Error::NotInitialized)?;
-                    let handle = s.open_files.get_mut(&badge_bits).ok_or(Error::InvalidArgs)?;
-                    handle.process_iouring(blk_client, badge)?;
+                    let handle = s.open_files.get_mut(&handle_id).ok_or(Error::InvalidArgs)?;
+                    handle.process_iouring(blk_client, caller_badge)?;
                     Ok(())
                 })
             }
