@@ -94,10 +94,6 @@ impl<'a> SystemService for FatFsService<'a> {
     fn run(&mut self) -> Result<(), Error> {
         self.running = true;
         while self.running {
-            if !self.recv.is_null() {
-                // recv_window 必须为空；否则下一次带 cap 的 IPC 会在内核插入时失败。
-                let _ = CSPACE_CAP.delete(self.recv);
-            }
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
             utcb.set_reply_window(self.reply.cap());
@@ -251,7 +247,13 @@ impl<'a> SystemService for FatFsService<'a> {
                 },
                 (FS_PROTO, protocol::fs::SETUP_IOURING) => |_s: &mut Self, u: &mut UTCB| {
                     handle_call(u, |_u_inner| {
-                        let _ = CSPACE_CAP.delete(_s.recv);
+                        if _u_inner
+                            .get_msg_tag()
+                            .flags()
+                            .contains(glenda::ipc::MsgFlags::HAS_CAP)
+                        {
+                            let _ = CSPACE_CAP.delete(_s.recv);
+                        }
                         Err::<usize, Error>(Error::NotSupported)
                     })
                 },

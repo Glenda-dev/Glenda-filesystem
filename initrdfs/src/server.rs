@@ -61,7 +61,11 @@ impl<'a> InitrdServer<'a> {
     fn handle_id_from_badge(badge: Badge) -> usize {
         if usize::BITS > 32 {
             let hi = badge.bits() >> 32;
-            if hi != 0 { hi } else { badge.bits() }
+            if hi != 0 {
+                hi
+            } else {
+                badge.bits()
+            }
         } else {
             badge.bits()
         }
