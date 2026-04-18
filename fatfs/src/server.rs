@@ -1,7 +1,7 @@
 use crate::fs::FatFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply};
+use glenda::cap::{CapPtr, Endpoint, Reply, CSPACE_CAP};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
