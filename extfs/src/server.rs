@@ -1,12 +1,12 @@
 use crate::fs::ExtFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply};
+use glenda::cap::{CapPtr, Endpoint, Reply, CSPACE_CAP};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
-use glenda::interface::{CSpaceService, VSpaceService};
 use glenda::interface::fs::FileHandleService;
 use glenda::interface::system::SystemService;
+use glenda::interface::{CSpaceService, VSpaceService};
 use glenda::io::uring::{IoUringBuffer, IoUringCqe, IOURING_OP_READ};
 use glenda::ipc::server::handle_call;
 use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
