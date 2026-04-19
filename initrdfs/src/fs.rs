@@ -261,4 +261,9 @@ impl InitrdFS {
     pub fn readlink(&self, _path: &str) -> Result<String, Error> {
         Err(Error::InvalidType)
     }
+
+    pub fn link(&mut self, _old_path: &str, _new_path: &str) -> Result<(), Error> {
+        // TODO: if initrd gains a writable overlay, implement hard-link creation in that layer.
+        Err(Error::NotSupported)
+    }
 }

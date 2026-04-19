@@ -419,6 +419,12 @@ impl ExtFs {
         Ok(())
     }
 
+    pub fn link(&mut self, _badge: Badge, _old_path: &str, _new_path: &str) -> Result<(), Error> {
+        // TODO: implement real hard-link creation (directory entry + inode link-count update)
+        // once ext write-path metadata operations are complete.
+        Err(Error::NotSupported)
+    }
+
     pub fn stat_path(&mut self, _badge: Badge, path: &str) -> Result<Stat, Error> {
         let ino = self.resolve_path(path)?;
         let inode = self.read_inode(ino)?;

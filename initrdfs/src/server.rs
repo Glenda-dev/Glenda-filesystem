@@ -217,6 +217,18 @@ impl<'a> SystemService for InitrdServer<'a> {
                     }
                 })
             },
+            (protocol::FS_PROTO, protocol::fs::LINK) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let (old_path, new_path): (alloc::string::String, alloc::string::String) =
+                        unsafe { u_inner.read_postcard()? };
+                    if let Some(fs) = &mut s.fs {
+                        fs.link(&old_path, &new_path)?;
+                        Ok(0usize)
+                    } else {
+                        Err(Error::NotInitialized)
+                    }
+                })
+            },
             (protocol::FS_PROTO, protocol::fs::CLOSE) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |_u_inner| {
                     if let Some(_handle) = s.open_files.remove(&handle_id) {

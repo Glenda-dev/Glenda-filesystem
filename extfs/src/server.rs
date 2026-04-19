@@ -191,6 +191,15 @@ impl<'a> SystemService for Ext4Service<'a> {
                     Ok(0usize)
                 })
             },
+            (FS_PROTO, glenda::protocol::fs::LINK) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u_inner| {
+                    let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;
+                    let (old_path, new_path): (alloc::string::String, alloc::string::String) =
+                        unsafe { u_inner.read_postcard()? };
+                    fs.link(caller_badge, &old_path, &new_path)?;
+                    Ok(0usize)
+                })
+            },
             (FS_PROTO, glenda::protocol::fs::STAT_PATH) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u_inner| {
                     let fs = s.fs.as_mut().ok_or(Error::NotInitialized)?;

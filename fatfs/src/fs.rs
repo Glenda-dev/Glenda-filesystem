@@ -380,6 +380,12 @@ impl FatFs {
         Ok(())
     }
 
+    pub fn link(&mut self, _old_path: &str, _new_path: &str) -> Result<(), Error> {
+        // TODO: keep this NotSupported until a FAT-compatible alias/link abstraction is
+        // designed; classic FAT/exFAT does not expose POSIX hard links.
+        Err(Error::NotSupported)
+    }
+
     pub fn stat_path(&mut self, path: &str) -> Result<Stat, Error> {
         let entry = self.lookup(path)?;
         let mut stat = Stat::default();
