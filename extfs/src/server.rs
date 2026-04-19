@@ -1,16 +1,17 @@
 use crate::fs::ExtFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use glenda::cap::{CapPtr, Endpoint, Reply, CSPACE_CAP};
+use glenda::cap::{CapPtr, CapType, Endpoint, Reply, CSPACE_CAP};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
 use glenda::interface::system::SystemService;
-use glenda::interface::{CSpaceService, VSpaceService};
+use glenda::interface::{CSpaceService, ResourceService, VSpaceService};
 use glenda::io::uring::{IoUringBuffer, IoUringCqe, IOURING_OP_READ};
 use glenda::ipc::server::handle_call;
 use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
 use glenda::mem::Perms;
+use glenda::protocol;
 use glenda::protocol::fs::OpenFlags;
 use glenda::protocol::process;
 use glenda::protocol::{FS_PROTO, PROCESS_PROTO};
@@ -403,6 +404,100 @@ impl<'a> SystemService for Ext4Service<'a> {
 
                     Ok(0usize)
                 })
+            },
+            (FS_PROTO, glenda::protocol::fs::MAP_PAGE) => |s: &mut Self, u: &mut UTCB| {
+                let offset = u.get_mr(0) as usize;
+                let req_pages = core::cmp::max(u.get_mr(1), 1);
+                let handle_id = Self::handle_id_from_badge(badge);
+                let handle = s.handles.get_mut(&handle_id).ok_or(Error::NotFound)?;
+
+                let frame_slot = s.recv;
+                let _ = CSPACE_CAP.delete(frame_slot);
+                let page_level = CapType::page_pages_to_level(req_pages).ok_or(Error::InvalidArgs)?;
+                if let Err(e) = s.res_client.alloc(Badge::null(), CapType::Page, page_level, frame_slot)
+                {
+                    return Err(e);
+                }
+                let frame = glenda::cap::Page::from(frame_slot);
+
+                let map_vaddr = s
+                    .next_iouring_vaddr
+                    .div_ceil(glenda::arch::mem::PGSIZE)
+                    .saturating_mul(glenda::arch::mem::PGSIZE);
+                let span_bytes = req_pages.saturating_mul(glenda::arch::mem::PGSIZE);
+                s.next_iouring_vaddr = map_vaddr.saturating_add(span_bytes);
+
+                if let Err(e) = s.vspace.map_page(
+                    frame,
+                    map_vaddr,
+                    Perms::READ | Perms::WRITE,
+                    req_pages,
+                    s.res_client,
+                    s.cspace,
+                ) {
+                    let _ = s.res_client.free(Badge::null(), frame_slot);
+                    return Err(e);
+                }
+
+                let read_res = {
+                    let page_buf = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            map_vaddr as *mut u8,
+                            span_bytes,
+                        )
+                    };
+                    page_buf.fill(0);
+                    let mut total = 0usize;
+                    for i in 0..req_pages {
+                        let page_off = i * glenda::arch::mem::PGSIZE;
+                        let chunk = &mut page_buf[page_off..page_off + glenda::arch::mem::PGSIZE];
+                        match handle.read(caller_badge, offset.saturating_add(page_off), chunk) {
+                            Ok(read_len) => {
+                                total = total.saturating_add(read_len);
+                                if read_len == 0 {
+                                    break;
+                                }
+                                if read_len < glenda::arch::mem::PGSIZE {
+                                    break;
+                                }
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(total)
+                };
+
+                let _ = s.vspace.unmap(map_vaddr, req_pages);
+
+                let read_len = match read_res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = s.res_client.free(Badge::null(), frame_slot);
+                        return Err(e);
+                    }
+                };
+
+                if read_len == 0 {
+                    let _ = s.res_client.free(Badge::null(), frame_slot);
+                    return Err(Error::IoError);
+                }
+
+                u.set_mr(0, read_len);
+                u.set_cap_transfer(frame_slot);
+                u.set_msg_tag(MsgTag::new(
+                    protocol::GENERIC_PROTO,
+                    protocol::generic::REPLY,
+                    MsgFlags::OK | MsgFlags::HAS_CAP,
+                ));
+                Ok(())
+            },
+            (FS_PROTO, glenda::protocol::fs::UNMAP_PAGE) => |s: &mut Self, u: &mut UTCB| {
+                if !u.get_msg_tag().flags().contains(MsgFlags::HAS_CAP) {
+                    return Err(Error::InvalidArgs);
+                }
+                let slot = s.recv;
+                let _ = s.res_client.free(Badge::null(), slot);
+                handle_call(u, |_u_inner| Ok(0usize))
             },
             (PROCESS_PROTO, process::EXIT) => |s: &mut Self, _u: &mut UTCB| {
                 s.running = false;
