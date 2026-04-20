@@ -79,6 +79,35 @@ impl BlockReader {
         Ok(buf.len())
     }
 
+    /// Write bytes at offset.
+    pub fn write_offset(&self, offset: usize, buf: &[u8]) -> Result<usize, Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let block_size = self.device_block_size()?;
+        let start_pos = offset;
+        let end_pos = start_pos + buf.len();
+
+        let start_sector = start_pos / block_size;
+        let end_sector = (end_pos + block_size - 1) / block_size;
+        let sector_count = end_sector - start_sector;
+        let write_size = sector_count * block_size;
+
+        if start_pos % block_size == 0 && buf.len() == write_size {
+            self.client.write_at(start_sector, buf.len() as u32, buf)?;
+        } else {
+            let mut temp_buf = alloc::vec::Vec::new();
+            temp_buf.resize(write_size, 0u8);
+            self.client.read_at(start_sector, write_size as u32, &mut temp_buf)?;
+            let copy_start = start_pos % block_size;
+            temp_buf[copy_start..copy_start + buf.len()].copy_from_slice(buf);
+            self.client.write_at(start_sector, write_size as u32, &temp_buf)?;
+        }
+
+        Ok(buf.len())
+    }
+
     pub fn read_shm(&self, offset: usize, len: u32, shm_vaddr: usize) -> Result<(), Error> {
         if len == 0 {
             return Ok(());

@@ -114,14 +114,21 @@ pub struct GroupDesc {
     pub bg_used_dirs_count_lo: u16,
     pub bg_flags: u16,
     pub bg_exclude_bitmap_lo: u32,
-    pub bg_block_bitmap_hi: u16,
-    pub bg_inode_bitmap_hi: u16,
-    pub bg_inode_table_hi: u16,
+    pub bg_block_bitmap_csum_lo: u16,
+    pub bg_inode_bitmap_csum_lo: u16,
+    pub bg_itable_unused_lo: u16,
+    pub bg_checksum: u16,
+    pub bg_block_bitmap_hi: u32,
+    pub bg_inode_bitmap_hi: u32,
+    pub bg_inode_table_hi: u32,
     pub bg_free_blocks_count_hi: u16,
     pub bg_free_inodes_count_hi: u16,
     pub bg_used_dirs_count_hi: u16,
-    pub bg_pad: u16,
-    pub bg_reserved: [u32; 3],
+    pub bg_itable_unused_hi: u16,
+    pub bg_exclude_bitmap_hi: u32,
+    pub bg_block_bitmap_csum_hi: u16,
+    pub bg_inode_bitmap_csum_hi: u16,
+    pub bg_reserved: [u32; 1],
 }
 
 #[repr(C, packed)]
@@ -149,6 +156,46 @@ pub struct Inode {
 pub const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
 pub const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
 pub const EXT4_FEATURE_INCOMPAT_64BIT: u32 = 0x0080;
+pub const EXT4_FEATURE_INCOMPAT_MMP: u32 = 0x0100;
+pub const EXT4_FEATURE_INCOMPAT_FLEX_BG: u32 = 0x0200;
+pub const EXT4_FEATURE_INCOMPAT_EA_INODE: u32 = 0x0400;
+pub const EXT4_FEATURE_INCOMPAT_DIRDATA: u32 = 0x1000;
+pub const EXT4_FEATURE_INCOMPAT_CSUM_SEED: u32 = 0x2000;
+pub const EXT4_FEATURE_INCOMPAT_LARGEDIR: u32 = 0x4000;
+pub const EXT4_FEATURE_INCOMPAT_INLINE_DATA: u32 = 0x8000;
+pub const EXT4_FEATURE_INCOMPAT_ENCRYPT: u32 = 0x10000;
+pub const EXT4_FEATURE_INCOMPAT_CASEFOLD: u32 = 0x40000;
+
+pub const EXT4_FEATURE_RO_COMPAT_HUGE_FILE: u32 = 0x0008;
+pub const EXT4_FEATURE_RO_COMPAT_DIR_NLINK: u32 = 0x0020;
+pub const EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE: u32 = 0x0040;
+pub const EXT4_FEATURE_RO_COMPAT_QUOTA: u32 = 0x0100;
+pub const EXT4_FEATURE_RO_COMPAT_BIGALLOC: u32 = 0x0200;
+pub const EXT4_FEATURE_RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
+pub const EXT4_FEATURE_RO_COMPAT_PROJECT: u32 = 0x2000;
+pub const EXT4_FEATURE_RO_COMPAT_VERITY: u32 = 0x8000;
+pub const EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT: u32 = 0x10000;
+
+pub const EXT4_FEATURE_INCOMPAT_WRITE_UNSUPPORTED_MASK: u32 = EXT4_FEATURE_INCOMPAT_MMP
+    | EXT4_FEATURE_INCOMPAT_FLEX_BG
+    | EXT4_FEATURE_INCOMPAT_EA_INODE
+    | EXT4_FEATURE_INCOMPAT_DIRDATA
+    | EXT4_FEATURE_INCOMPAT_CSUM_SEED
+    | EXT4_FEATURE_INCOMPAT_LARGEDIR
+    | EXT4_FEATURE_INCOMPAT_INLINE_DATA
+    | EXT4_FEATURE_INCOMPAT_ENCRYPT
+    | EXT4_FEATURE_INCOMPAT_CASEFOLD;
+
+pub const EXT4_FEATURE_RO_COMPAT_WRITE_UNSUPPORTED_MASK: u32 = EXT4_FEATURE_RO_COMPAT_HUGE_FILE
+    | EXT4_FEATURE_RO_COMPAT_DIR_NLINK
+    | EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE
+    | EXT4_FEATURE_RO_COMPAT_QUOTA
+    | EXT4_FEATURE_RO_COMPAT_BIGALLOC
+    | EXT4_FEATURE_RO_COMPAT_METADATA_CSUM
+    | EXT4_FEATURE_RO_COMPAT_PROJECT
+    | EXT4_FEATURE_RO_COMPAT_VERITY
+    | EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT;
+
 pub const EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 pub const EXT4_EXTENTS_FL: u32 = 0x80000;
 pub const EXT4_EXT_MAGIC: u16 = 0xF30A;

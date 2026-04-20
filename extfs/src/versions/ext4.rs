@@ -10,6 +10,89 @@ use glenda::error::Error;
 pub struct Ext4Ops;
 
 impl Ext4Ops {
+    const EXTENT_ROOT_SIZE: usize = 60;
+
+    fn write_header_to_inode(inode: &mut Inode, header: &ExtentHeader) {
+        let raw = unsafe {
+            core::slice::from_raw_parts(
+                header as *const ExtentHeader as *const u8,
+                core::mem::size_of::<ExtentHeader>(),
+            )
+        };
+        inode.i_block[..raw.len()].copy_from_slice(raw);
+    }
+
+    fn read_extent_at(data: &[u8], idx: usize) -> Extent {
+        let off = size_of::<ExtentHeader>() + idx * size_of::<Extent>();
+        unsafe { core::ptr::read_unaligned(data.as_ptr().add(off) as *const Extent) }
+    }
+
+    fn write_extent_to_inode(inode: &mut Inode, idx: usize, ext: &Extent) {
+        let off = size_of::<ExtentHeader>() + idx * size_of::<Extent>();
+        let raw = unsafe {
+            core::slice::from_raw_parts(
+                ext as *const Extent as *const u8,
+                core::mem::size_of::<Extent>(),
+            )
+        };
+        inode.i_block[off..off + raw.len()].copy_from_slice(raw);
+    }
+
+    fn map_block_extent_create(
+        &self,
+        inode: &mut Inode,
+        lblock: u32,
+        alloc_block: &mut dyn FnMut() -> Result<u32, Error>,
+    ) -> Result<u32, Error> {
+        let max_entries =
+            ((Self::EXTENT_ROOT_SIZE - size_of::<ExtentHeader>()) / size_of::<Extent>()) as u16;
+
+        let mut header =
+            unsafe { core::ptr::read_unaligned(inode.i_block.as_ptr() as *const ExtentHeader) };
+        if header.eh_magic != EXT4_EXT_MAGIC {
+            header = ExtentHeader {
+                eh_magic: EXT4_EXT_MAGIC,
+                eh_entries: 0,
+                eh_max: max_entries,
+                eh_depth: 0,
+                eh_generation: 0,
+            };
+            Self::write_header_to_inode(inode, &header);
+        }
+
+        if header.eh_depth != 0 {
+            return Err(Error::NotSupported);
+        }
+
+        for i in 0..header.eh_entries as usize {
+            let ext = Self::read_extent_at(&inode.i_block, i);
+            let ee_len = ext.ee_len as u32;
+            if lblock >= ext.ee_block && lblock < ext.ee_block.saturating_add(ee_len) {
+                let relative = lblock - ext.ee_block;
+                let start = ((ext.ee_start_hi as u64) << 32) | ext.ee_start_lo as u64;
+                return Ok((start + relative as u64) as u32);
+            }
+        }
+
+        if header.eh_entries >= header.eh_max {
+            return Err(Error::OutOfMemory);
+        }
+
+        let pblock = alloc_block()?;
+        let new_ext = Extent {
+            ee_block: lblock,
+            ee_len: 1,
+            ee_start_hi: ((pblock as u64) >> 32) as u16,
+            ee_start_lo: pblock,
+        };
+        let idx = header.eh_entries as usize;
+        Self::write_extent_to_inode(inode, idx, &new_ext);
+        header.eh_entries = header.eh_entries.saturating_add(1);
+        Self::write_header_to_inode(inode, &header);
+
+        Ok(pblock)
+    }
+
     // Helper to binary search extents in a block/buffer
     fn search_extent_block(&self, data: &[u8], lblock: u32) -> Result<usize, Error> {
         // data starts with ExtentHeader
@@ -146,5 +229,37 @@ impl ExtOps for Ext4Ops {
 
         // Found physical block of data
         Ok(curr_phys as u32)
+    }
+
+    fn map_block(
+        &self,
+        reader: &BlockReader,
+        inode: &mut Inode,
+        lblock: u32,
+        block_size: u32,
+        create: bool,
+        alloc_block: &mut dyn FnMut() -> Result<u32, Error>,
+    ) -> Result<u32, Error> {
+        if (inode.i_flags & EXT4_EXTENTS_FL) != 0 {
+            let mapped = self.get_block_addr(reader, inode, lblock, block_size)?;
+            if mapped != 0 {
+                return Ok(mapped);
+            }
+
+            if create {
+                return self.map_block_extent_create(inode, lblock, alloc_block);
+            }
+            return Ok(0);
+        }
+
+        <Ext2Ops as ExtOps>::map_block(
+            &Ext2Ops,
+            reader,
+            inode,
+            lblock,
+            block_size,
+            create,
+            alloc_block,
+        )
     }
 }

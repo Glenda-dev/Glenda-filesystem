@@ -18,7 +18,7 @@ use glenda::interface::fs::FileSystemJournalService;
 use glenda::io::uring::RingParams;
 use glenda::ipc::Badge;
 use glenda::mem::shm::ShmParams;
-use glenda::protocol::fs::{DEntry, OpenFlags, Stat};
+use glenda::protocol::fs::{seek, DEntry, OpenFlags, Stat};
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 pub struct ExtFs {
@@ -30,6 +30,7 @@ pub struct ExtFs {
     ops: Arc<dyn ExtOps>,
     ring_vaddr: usize,
     ring_size: usize,
+    writable: bool,
 }
 
 use glenda::client::ResourceClient;
@@ -37,7 +38,20 @@ use glenda::interface::ResourceService;
 
 impl ExtFs {
     const S_IFMT: u16 = 0xF000;
+    const S_IFDIR: u16 = 0x4000;
+    const S_IFREG: u16 = 0x8000;
     const S_IFLNK: u16 = 0xA000;
+
+    fn is_ext4(sb: &SuperBlock) -> bool {
+        (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0
+    }
+
+    fn ext4_writable(sb: &SuperBlock) -> bool {
+        let unsupported_incompat =
+            sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_WRITE_UNSUPPORTED_MASK;
+        let unsupported_ro = sb.s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_WRITE_UNSUPPORTED_MASK;
+        unsupported_incompat == 0 && unsupported_ro == 0
+    }
 
     fn fs_kind(sb: &SuperBlock) -> &'static str {
         let feature_incompat = sb.s_feature_incompat;
@@ -88,6 +102,302 @@ impl ExtFs {
         } else {
             lo
         }
+    }
+
+    fn group_count(sb: &SuperBlock) -> u32 {
+        let blocks_per_group = sb.s_blocks_per_group;
+        if blocks_per_group == 0 {
+            return 0;
+        }
+        let blocks = Self::block_count(sb);
+        blocks.div_ceil(blocks_per_group as u64) as u32
+    }
+
+    fn inode_rec_len(sb: &SuperBlock) -> usize {
+        core::cmp::max(sb.s_inode_size as usize, core::mem::size_of::<Inode>())
+    }
+
+    fn read_superblock_raw(reader: &BlockReader) -> Result<SuperBlock, Error> {
+        let mut sb_buf = [0u8; 1024];
+        reader.read_offset(SUPER_BLOCK_OFFSET, &mut sb_buf)?;
+        Ok(unsafe { core::ptr::read_unaligned(sb_buf.as_ptr() as *const SuperBlock) })
+    }
+
+    fn write_superblock_raw(reader: &BlockReader, sb: &SuperBlock) -> Result<(), Error> {
+        let mut disk = [0u8; 1024];
+        reader.read_offset(SUPER_BLOCK_OFFSET, &mut disk)?;
+
+        let raw = unsafe {
+            core::slice::from_raw_parts(
+                sb as *const SuperBlock as *const u8,
+                core::mem::size_of::<SuperBlock>(),
+            )
+        };
+        let n = core::cmp::min(raw.len(), disk.len());
+        disk[..n].copy_from_slice(&raw[..n]);
+        reader.write_offset(SUPER_BLOCK_OFFSET, &disk)?;
+        Ok(())
+    }
+
+    fn group_desc_off(block_size: u32, group_desc_size: u16, group: u32) -> usize {
+        let first_bg_block = 1usize;
+        (first_bg_block * block_size as usize) + (group as usize * group_desc_size as usize)
+    }
+
+    fn read_group_desc_raw(
+        reader: &BlockReader,
+        block_size: u32,
+        group_desc_size: u16,
+        group: u32,
+    ) -> Result<GroupDesc, Error> {
+        let offset = Self::group_desc_off(block_size, group_desc_size, group);
+        let mut buf = [0u8; 64];
+        reader.read_offset(offset, &mut buf)?;
+        Ok(unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const GroupDesc) })
+    }
+
+    fn write_group_desc_raw(
+        reader: &BlockReader,
+        block_size: u32,
+        group_desc_size: u16,
+        group: u32,
+        gd: &GroupDesc,
+    ) -> Result<(), Error> {
+        let offset = Self::group_desc_off(block_size, group_desc_size, group);
+        let mut disk = [0u8; 64];
+        reader.read_offset(offset, &mut disk)?;
+        let raw = unsafe {
+            core::slice::from_raw_parts(
+                gd as *const GroupDesc as *const u8,
+                core::mem::size_of::<GroupDesc>(),
+            )
+        };
+        let n = core::cmp::min(raw.len(), disk.len());
+        disk[..n].copy_from_slice(&raw[..n]);
+        reader.write_offset(offset, &disk)?;
+        Ok(())
+    }
+
+    #[inline]
+    fn gd_free_blocks(gd: &GroupDesc, sb: &SuperBlock) -> u32 {
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            ((gd.bg_free_blocks_count_hi as u32) << 16) | gd.bg_free_blocks_count_lo as u32
+        } else {
+            gd.bg_free_blocks_count_lo as u32
+        }
+    }
+
+    #[inline]
+    fn set_gd_free_blocks(gd: &mut GroupDesc, sb: &SuperBlock, value: u32) {
+        gd.bg_free_blocks_count_lo = (value & 0xffff) as u16;
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            gd.bg_free_blocks_count_hi = ((value >> 16) & 0xffff) as u16;
+        }
+    }
+
+    #[inline]
+    fn gd_free_inodes(gd: &GroupDesc, sb: &SuperBlock) -> u32 {
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            ((gd.bg_free_inodes_count_hi as u32) << 16) | gd.bg_free_inodes_count_lo as u32
+        } else {
+            gd.bg_free_inodes_count_lo as u32
+        }
+    }
+
+    #[inline]
+    fn set_gd_free_inodes(gd: &mut GroupDesc, sb: &SuperBlock, value: u32) {
+        gd.bg_free_inodes_count_lo = (value & 0xffff) as u16;
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            gd.bg_free_inodes_count_hi = ((value >> 16) & 0xffff) as u16;
+        }
+    }
+
+    #[inline]
+    fn gd_block_bitmap(gd: &GroupDesc, sb: &SuperBlock) -> u64 {
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            ((gd.bg_block_bitmap_hi as u64) << 32) | gd.bg_block_bitmap_lo as u64
+        } else {
+            gd.bg_block_bitmap_lo as u64
+        }
+    }
+
+    #[inline]
+    fn gd_inode_bitmap(gd: &GroupDesc, sb: &SuperBlock) -> u64 {
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            ((gd.bg_inode_bitmap_hi as u64) << 32) | gd.bg_inode_bitmap_lo as u64
+        } else {
+            gd.bg_inode_bitmap_lo as u64
+        }
+    }
+
+    #[inline]
+    fn gd_inode_table(gd: &GroupDesc, sb: &SuperBlock) -> u64 {
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            ((gd.bg_inode_table_hi as u64) << 32) | gd.bg_inode_table_lo as u64
+        } else {
+            gd.bg_inode_table_lo as u64
+        }
+    }
+
+    fn set_sb_free_blocks(sb: &mut SuperBlock, value: u64) {
+        sb.s_free_blocks_count_lo = (value & 0xffff_ffff) as u32;
+        if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0 {
+            sb.s_free_blocks_count_hi = ((value >> 32) & 0xffff_ffff) as u32;
+        }
+    }
+
+    fn alloc_block_raw(
+        reader: &BlockReader,
+        sb: &mut SuperBlock,
+        block_size: u32,
+        group_desc_size: u16,
+    ) -> Result<u32, Error> {
+        let groups = Self::group_count(sb);
+        let total_blocks = Self::block_count(sb);
+        let blocks_per_group = sb.s_blocks_per_group as usize;
+
+        for group in 0..groups {
+            let mut gd = Self::read_group_desc_raw(reader, block_size, group_desc_size, group)?;
+
+            let free_blocks = Self::gd_free_blocks(&gd, sb);
+            if free_blocks == 0 {
+                continue;
+            }
+
+            let bitmap_block = Self::gd_block_bitmap(&gd, sb) as usize;
+            let mut bitmap = alloc::vec![0u8; block_size as usize];
+            reader.read_offset(bitmap_block * block_size as usize, &mut bitmap)?;
+
+            let group_first =
+                sb.s_first_data_block as u64 + group as u64 * sb.s_blocks_per_group as u64;
+            if group_first >= total_blocks {
+                continue;
+            }
+            let max_bits = core::cmp::min(blocks_per_group, (total_blocks - group_first) as usize);
+
+            for bit in 0..max_bits {
+                let byte_idx = bit / 8;
+                let bit_mask = 1u8 << (bit % 8);
+                if (bitmap[byte_idx] & bit_mask) == 0 {
+                    bitmap[byte_idx] |= bit_mask;
+                    reader.write_offset(bitmap_block * block_size as usize, &bitmap)?;
+
+                    let new_gd_free = free_blocks.saturating_sub(1);
+                    Self::set_gd_free_blocks(&mut gd, sb, new_gd_free);
+                    Self::write_group_desc_raw(reader, block_size, group_desc_size, group, &gd)?;
+
+                    let sb_free = Self::free_block_count(sb).saturating_sub(1);
+                    Self::set_sb_free_blocks(sb, sb_free);
+                    Self::write_superblock_raw(reader, sb)?;
+
+                    return Ok((group_first + bit as u64) as u32);
+                }
+            }
+        }
+
+        Err(Error::OutOfMemory)
+    }
+
+    fn alloc_inode_raw(
+        reader: &BlockReader,
+        sb: &mut SuperBlock,
+        block_size: u32,
+        group_desc_size: u16,
+    ) -> Result<u32, Error> {
+        let groups = Self::group_count(sb);
+        let inodes_per_group = sb.s_inodes_per_group as usize;
+        let inode_size = Self::inode_rec_len(sb);
+        let total_inodes = sb.s_inodes_count as usize;
+        let first_ino = core::cmp::max(sb.s_first_ino as usize, ROOT_INO as usize);
+
+        for group in 0..groups {
+            let mut gd = match Self::read_group_desc_raw(reader, block_size, group_desc_size, group)
+            {
+                Ok(gd) => gd,
+                Err(e) => {
+                    warn!("ExtFS: alloc_inode group {} read_group_desc failed: {:?}", group, e);
+                    return Err(e);
+                }
+            };
+
+            let free_inodes = Self::gd_free_inodes(&gd, sb);
+            if free_inodes == 0 {
+                continue;
+            }
+
+            let bitmap_block = Self::gd_inode_bitmap(&gd, sb) as usize;
+            let mut bitmap = alloc::vec![0u8; block_size as usize];
+            if let Err(e) = reader.read_offset(bitmap_block * block_size as usize, &mut bitmap) {
+                warn!(
+                    "ExtFS: alloc_inode group {} read inode bitmap block {} failed: {:?}",
+                    group, bitmap_block, e
+                );
+                return Err(e);
+            }
+
+            let group_first_ino = group as usize * inodes_per_group + 1;
+            if group_first_ino > total_inodes {
+                continue;
+            }
+            let max_bits = core::cmp::min(inodes_per_group, total_inodes - group_first_ino + 1);
+
+            for bit in 0..max_bits {
+                let ino = group_first_ino + bit;
+                if ino < first_ino {
+                    continue;
+                }
+
+                let byte_idx = bit / 8;
+                let bit_mask = 1u8 << (bit % 8);
+                if (bitmap[byte_idx] & bit_mask) == 0 {
+                    bitmap[byte_idx] |= bit_mask;
+                    if let Err(e) = reader.write_offset(bitmap_block * block_size as usize, &bitmap)
+                    {
+                        warn!(
+                            "ExtFS: alloc_inode group {} write inode bitmap block {} failed: {:?}",
+                            group, bitmap_block, e
+                        );
+                        return Err(e);
+                    }
+
+                    let new_gd_free = free_inodes.saturating_sub(1);
+                    Self::set_gd_free_inodes(&mut gd, sb, new_gd_free);
+                    if let Err(e) =
+                        Self::write_group_desc_raw(reader, block_size, group_desc_size, group, &gd)
+                    {
+                        warn!(
+                            "ExtFS: alloc_inode group {} write group desc failed: {:?}",
+                            group, e
+                        );
+                        return Err(e);
+                    }
+
+                    sb.s_free_inodes_count = sb.s_free_inodes_count.saturating_sub(1);
+                    if let Err(e) = Self::write_superblock_raw(reader, sb) {
+                        warn!(
+                            "ExtFS: alloc_inode group {} write superblock failed: {:?}",
+                            group, e
+                        );
+                        return Err(e);
+                    }
+
+                    let inode_table = Self::gd_inode_table(&gd, sb) as usize;
+                    let inode_off = inode_table * block_size as usize + bit * inode_size;
+                    let zero = alloc::vec![0u8; inode_size];
+                    if let Err(e) = reader.write_offset(inode_off, &zero) {
+                        warn!(
+                            "ExtFS: alloc_inode group {} zero inode {} at off {} failed: {:?}",
+                            group, ino, inode_off, e
+                        );
+                        return Err(e);
+                    }
+
+                    return Ok(ino as u32);
+                }
+            }
+        }
+
+        Err(Error::OutOfMemory)
     }
 
     pub fn new(
@@ -152,6 +462,21 @@ impl ExtFs {
         } else {
             // log!("Detected Ext2");
             Arc::new(Ext2Ops)
+        };
+
+        let writable = if Self::is_ext4(&sb) {
+            let can_write = Self::ext4_writable(&sb);
+            if !can_write {
+                let incompat = sb.s_feature_incompat;
+                let ro_compat = sb.s_feature_ro_compat;
+                warn!(
+                    "ext4 write path features not fully supported; enabling basic write path anyway: incompat=0x{:08x}, ro_compat=0x{:08x}",
+                    incompat, ro_compat
+                );
+            }
+            true
+        } else {
+            true
         };
 
         let fs_kind = Self::fs_kind(&sb);
@@ -223,23 +548,24 @@ impl ExtFs {
             ops,
             ring_vaddr,
             ring_size,
+            writable,
         })
     }
 
     fn read_group_desc(&self, group: u32) -> Result<GroupDesc, Error> {
-        let first_bg_block = self.sb.s_first_data_block + 1;
-        let offset = (first_bg_block as usize * self.block_size as usize)
-            + (group as usize * self.group_desc_size as usize);
+        Self::read_group_desc_raw(&self.reader, self.block_size, self.group_desc_size, group)
+    }
 
-        let mut buf = [0u8; 64];
-        self.reader.read_offset(offset, &mut buf)?;
-
-        // Handling packed struct read safely
-        let gd = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const GroupDesc) };
-        Ok(gd)
+    fn write_group_desc(&self, group: u32, gd: &GroupDesc) -> Result<(), Error> {
+        Self::write_group_desc_raw(&self.reader, self.block_size, self.group_desc_size, group, gd)
     }
 
     fn read_inode(&self, ino: u32) -> Result<Inode, Error> {
+        let (inode, _) = self.read_inode_with_offset(ino)?;
+        Ok(inode)
+    }
+
+    fn read_inode_with_offset(&self, ino: u32) -> Result<(Inode, usize), Error> {
         if ino < 1 {
             return Err(Error::NotFound);
         }
@@ -250,15 +576,58 @@ impl ExtFs {
 
         let table_block = gd.bg_inode_table_lo;
 
-        let inode_size = self.sb.s_inode_size as usize;
+        let inode_size = Self::inode_rec_len(&self.sb);
         let offset =
             (table_block as usize * self.block_size as usize) + (index as usize * inode_size);
 
-        let mut buf = [0u8; 256];
-        self.reader.read_offset(offset, &mut buf)?;
+        let mut buf = alloc::vec![0u8; inode_size];
+        self.reader.read_offset(offset, &mut buf[..])?;
 
         let inode = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Inode) };
-        Ok(inode)
+        Ok((inode, offset))
+    }
+
+    fn write_inode_at_offset(&self, inode: &Inode, inode_offset: usize) -> Result<(), Error> {
+        let inode_size = Self::inode_rec_len(&self.sb);
+        let mut disk_inode = alloc::vec![0u8; inode_size];
+        self.reader.read_offset(inode_offset, &mut disk_inode)?;
+
+        let inode_raw = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Inode as *const u8,
+                core::mem::size_of::<Inode>(),
+            )
+        };
+        let copy_len = core::cmp::min(inode_raw.len(), disk_inode.len());
+        disk_inode[..copy_len].copy_from_slice(&inode_raw[..copy_len]);
+
+        self.reader.write_offset(inode_offset, &disk_inode)?;
+        Ok(())
+    }
+
+    fn write_inode_by_number(&self, ino: u32, inode: &Inode) -> Result<(), Error> {
+        let (_, inode_offset) = self.read_inode_with_offset(ino)?;
+        self.write_inode_at_offset(inode, inode_offset)
+    }
+
+    fn alloc_block(&mut self) -> Result<u32, Error> {
+        let block = Self::alloc_block_raw(
+            &self.reader,
+            &mut self.sb,
+            self.block_size,
+            self.group_desc_size,
+        )?;
+        Ok(block)
+    }
+
+    fn alloc_inode(&mut self) -> Result<u32, Error> {
+        let ino = Self::alloc_inode_raw(
+            &self.reader,
+            &mut self.sb,
+            self.block_size,
+            self.group_desc_size,
+        )?;
+        Ok(ino)
     }
 
     fn get_block_addr(&self, inode: &Inode, lblock: u32) -> Result<u32, Error> {
@@ -352,6 +721,295 @@ impl ExtFs {
 
         Err(Error::NotFound)
     }
+
+    #[inline]
+    fn dir_rec_len(name_len: usize) -> usize {
+        (8 + name_len + 3) & !3
+    }
+
+    #[inline]
+    fn inode_block_ptr(inode: &Inode, index: usize) -> u32 {
+        let off = index * 4;
+        u32::from_le_bytes([
+            inode.i_block[off],
+            inode.i_block[off + 1],
+            inode.i_block[off + 2],
+            inode.i_block[off + 3],
+        ])
+    }
+
+    #[inline]
+    fn set_inode_block_ptr(inode: &mut Inode, index: usize, value: u32) {
+        let off = index * 4;
+        let bytes = value.to_le_bytes();
+        inode.i_block[off..off + 4].copy_from_slice(&bytes);
+    }
+
+    #[inline]
+    fn file_type_from_mode(mode: u16) -> u8 {
+        match mode & Self::S_IFMT {
+            Self::S_IFDIR => EXT4_FT_DIR,
+            Self::S_IFREG => EXT4_FT_REG_FILE,
+            _ => EXT4_FT_UNKNOWN,
+        }
+    }
+
+    fn split_parent_name(path: &str) -> Result<(String, String), Error> {
+        if path.is_empty() || path == "/" {
+            return Err(Error::InvalidArgs);
+        }
+        let normalized =
+            if path.ends_with('/') && path.len() > 1 { &path[..path.len() - 1] } else { path };
+        let slash = normalized.rfind('/').ok_or(Error::InvalidArgs)?;
+        let parent =
+            if slash == 0 { String::from("/") } else { String::from(&normalized[..slash]) };
+        let name = String::from(&normalized[slash + 1..]);
+        if name.is_empty() || name.len() > 255 {
+            return Err(Error::InvalidArgs);
+        }
+        Ok((parent, name))
+    }
+
+    fn map_inode_block(
+        &mut self,
+        inode: &mut Inode,
+        lblock: u32,
+        create: bool,
+    ) -> Result<u32, Error> {
+        let ops = self.ops.clone();
+        let reader = self.reader.clone();
+        let block_size = self.block_size;
+        let group_desc_size = self.group_desc_size;
+        let mut sb = self.sb;
+        let mut alloc = || Self::alloc_block_raw(&reader, &mut sb, block_size, group_desc_size);
+
+        let pblock = ops.map_block(&reader, inode, lblock, block_size, create, &mut alloc)?;
+        self.sb = sb;
+        Ok(pblock)
+    }
+
+    fn add_dir_entry(
+        &mut self,
+        dir_ino: u32,
+        name: &str,
+        child_ino: u32,
+        file_type: u8,
+    ) -> Result<(), Error> {
+        let (mut dir_inode, dir_inode_off) = self.read_inode_with_offset(dir_ino)?;
+        if (dir_inode.i_mode & Self::S_IFMT) != Self::S_IFDIR {
+            return Err(Error::InvalidType);
+        }
+
+        if self.find_entry(dir_ino, name).is_ok() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let need = Self::dir_rec_len(name.len());
+        let mut dir_size = dir_inode.i_size_lo as usize;
+        let block_size = self.block_size as usize;
+
+        let mut lblock = 0usize;
+        while lblock * block_size < dir_size {
+            let pblock = self.map_inode_block(&mut dir_inode, lblock as u32, false)?;
+            if pblock == 0 {
+                lblock += 1;
+                continue;
+            }
+
+            let mut block = alloc::vec![0u8; block_size];
+            let block_off = pblock as usize * block_size;
+            self.reader.read_offset(block_off, &mut block)?;
+
+            let mut off = 0usize;
+            while off + 8 <= block_size {
+                let de = unsafe {
+                    core::ptr::read_unaligned(block.as_ptr().add(off) as *const DirEntry2)
+                };
+                let rec_len = de.rec_len as usize;
+                if rec_len < 8 || off + rec_len > block_size {
+                    return Err(Error::IoError);
+                }
+
+                if de.inode == 0 && rec_len >= need {
+                    let rec_u16 = rec_len as u16;
+                    block[off..off + 4].copy_from_slice(&child_ino.to_le_bytes());
+                    block[off + 4..off + 6].copy_from_slice(&rec_u16.to_le_bytes());
+                    block[off + 6] = name.len() as u8;
+                    block[off + 7] = file_type;
+                    block[off + 8..off + 8 + name.len()].copy_from_slice(name.as_bytes());
+                    self.reader.write_offset(block_off, &block)?;
+                    self.write_inode_at_offset(&dir_inode, dir_inode_off)?;
+                    return Ok(());
+                }
+
+                if de.inode != 0 {
+                    let used = Self::dir_rec_len(de.name_len as usize);
+                    if rec_len >= used + need {
+                        let new_off = off + used;
+                        let tail = rec_len - used;
+
+                        let used_u16 = used as u16;
+                        block[off + 4..off + 6].copy_from_slice(&used_u16.to_le_bytes());
+
+                        let tail_u16 = tail as u16;
+                        block[new_off..new_off + 4].copy_from_slice(&child_ino.to_le_bytes());
+                        block[new_off + 4..new_off + 6].copy_from_slice(&tail_u16.to_le_bytes());
+                        block[new_off + 6] = name.len() as u8;
+                        block[new_off + 7] = file_type;
+                        block[new_off + 8..new_off + 8 + name.len()]
+                            .copy_from_slice(name.as_bytes());
+
+                        self.reader.write_offset(block_off, &block)?;
+                        self.write_inode_at_offset(&dir_inode, dir_inode_off)?;
+                        return Ok(());
+                    }
+                }
+
+                off += rec_len;
+            }
+
+            lblock += 1;
+        }
+
+        // Need a new directory data block.
+        let new_lblock = dir_size.div_ceil(block_size);
+        let pblock = self.map_inode_block(&mut dir_inode, new_lblock as u32, true)?;
+        if pblock == 0 {
+            return Err(Error::OutOfMemory);
+        }
+
+        let mut block = alloc::vec![0u8; block_size];
+        let rec_u16 = block_size as u16;
+        block[0..4].copy_from_slice(&child_ino.to_le_bytes());
+        block[4..6].copy_from_slice(&rec_u16.to_le_bytes());
+        block[6] = name.len() as u8;
+        block[7] = file_type;
+        block[8..8 + name.len()].copy_from_slice(name.as_bytes());
+        self.reader.write_offset(pblock as usize * block_size, &block)?;
+
+        dir_size = core::cmp::max(dir_size, (new_lblock + 1) * block_size);
+        dir_inode.i_size_lo = dir_size as u32;
+        self.write_inode_at_offset(&dir_inode, dir_inode_off)?;
+        Ok(())
+    }
+
+    fn remove_dir_entry(&mut self, dir_ino: u32, name: &str) -> Result<u32, Error> {
+        let (dir_inode, dir_inode_off) = self.read_inode_with_offset(dir_ino)?;
+        if (dir_inode.i_mode & Self::S_IFMT) != Self::S_IFDIR {
+            return Err(Error::InvalidType);
+        }
+
+        let dir_size = dir_inode.i_size_lo as usize;
+        let block_size = self.block_size as usize;
+        let mut cursor = 0usize;
+
+        while cursor < dir_size {
+            let lblock = (cursor / block_size) as u32;
+            let pblock = self.get_block_addr(&dir_inode, lblock)?;
+            if pblock == 0 {
+                cursor = ((cursor / block_size) + 1) * block_size;
+                continue;
+            }
+
+            let mut block = alloc::vec![0u8; block_size];
+            let block_off = pblock as usize * block_size;
+            self.reader.read_offset(block_off, &mut block)?;
+
+            let mut off = cursor % block_size;
+            let mut prev_off: Option<usize> = None;
+            while off + 8 <= block_size {
+                let de = unsafe {
+                    core::ptr::read_unaligned(block.as_ptr().add(off) as *const DirEntry2)
+                };
+                let rec_len = de.rec_len as usize;
+                if rec_len < 8 || off + rec_len > block_size {
+                    return Err(Error::IoError);
+                }
+
+                if de.inode != 0 {
+                    let name_len = de.name_len as usize;
+                    if name_len == name.len() {
+                        let entry_name = &block[off + 8..off + 8 + name_len];
+                        if entry_name == name.as_bytes() {
+                            let removed_ino = de.inode;
+                            if let Some(poff) = prev_off {
+                                let pde = unsafe {
+                                    core::ptr::read_unaligned(
+                                        block.as_ptr().add(poff) as *const DirEntry2
+                                    )
+                                };
+                                let merged = (pde.rec_len as usize).saturating_add(rec_len) as u16;
+                                block[poff + 4..poff + 6].copy_from_slice(&merged.to_le_bytes());
+                            } else {
+                                block[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                            }
+
+                            self.reader.write_offset(block_off, &block)?;
+                            self.write_inode_at_offset(&dir_inode, dir_inode_off)?;
+                            return Ok(removed_ino);
+                        }
+                    }
+                    prev_off = Some(off);
+                }
+
+                off += rec_len;
+            }
+
+            cursor = ((cursor / block_size) + 1) * block_size;
+        }
+
+        Err(Error::NotFound)
+    }
+
+    fn is_dir_empty(&self, dir_ino: u32) -> Result<bool, Error> {
+        let dir_inode = self.read_inode(dir_ino)?;
+        if (dir_inode.i_mode & Self::S_IFMT) != Self::S_IFDIR {
+            return Err(Error::InvalidType);
+        }
+
+        let size = dir_inode.i_size_lo as usize;
+        let mut cursor = 0usize;
+        let block_size = self.block_size as usize;
+
+        while cursor < size {
+            let lblock = (cursor / block_size) as u32;
+            let pblock = self.get_block_addr(&dir_inode, lblock)?;
+            if pblock == 0 {
+                cursor = ((cursor / block_size) + 1) * block_size;
+                continue;
+            }
+
+            let mut block = alloc::vec![0u8; block_size];
+            self.reader.read_offset(pblock as usize * block_size, &mut block)?;
+
+            let mut off = cursor % block_size;
+            while off + 8 <= block_size {
+                let de = unsafe {
+                    core::ptr::read_unaligned(block.as_ptr().add(off) as *const DirEntry2)
+                };
+                let rec_len = de.rec_len as usize;
+                if rec_len < 8 || off + rec_len > block_size {
+                    return Err(Error::IoError);
+                }
+
+                if de.inode != 0 {
+                    let name_len = de.name_len as usize;
+                    let is_dot = name_len == 1 && block[off + 8] == b'.';
+                    let is_dotdot =
+                        name_len == 2 && block[off + 8] == b'.' && block[off + 9] == b'.';
+                    if !is_dot && !is_dotdot {
+                        return Ok(false);
+                    }
+                }
+
+                off += rec_len;
+            }
+
+            cursor = ((cursor / block_size) + 1) * block_size;
+        }
+
+        Ok(true)
+    }
 }
 
 impl FileSystemJournalService for ExtFs {
@@ -387,42 +1045,244 @@ impl ExtFs {
         &mut self,
         _badge: Badge,
         path: &str,
-        _flags: OpenFlags,
-        _mode: u32,
+        flags: OpenFlags,
+        mode: u32,
     ) -> Result<Box<dyn FileHandleService + Send>, Error> {
-        let ino = self.resolve_path(path)?;
-        let inode = self.read_inode(ino)?;
+        let access_mode = flags.bits() & 0o3;
+        let can_write =
+            access_mode == OpenFlags::O_WRONLY.bits() || access_mode == OpenFlags::O_RDWR.bits();
+        let can_read = access_mode != OpenFlags::O_WRONLY.bits();
+
+        if can_write && !self.writable {
+            return Err(Error::NotSupported);
+        }
+
+        let ino = match self.resolve_path(path) {
+            Ok(ino) => {
+                if flags.contains(OpenFlags::O_CREAT) && flags.contains(OpenFlags::O_EXCL) {
+                    return Err(Error::AlreadyExists);
+                }
+                ino
+            }
+            Err(Error::NotFound) => {
+                if !flags.contains(OpenFlags::O_CREAT) {
+                    return Err(Error::NotFound);
+                }
+
+                if !self.writable {
+                    return Err(Error::NotSupported);
+                }
+
+                let (parent_path, file_name) = Self::split_parent_name(path)?;
+                warn!(
+                    "ExtFS: creating path={}, parent_path={}, file_name={}",
+                    path, parent_path, file_name
+                );
+
+                let parent_ino = self.resolve_path(&parent_path)?;
+                let parent_inode = self.read_inode(parent_ino)?;
+                if (parent_inode.i_mode & Self::S_IFMT) != Self::S_IFDIR {
+                    return Err(Error::InvalidType);
+                }
+
+                let new_ino = match self.alloc_inode() {
+                    Ok(ino) => ino,
+                    Err(e) => {
+                        warn!("ExtFS: alloc_inode failed for {}: {:?}", path, e);
+                        return Err(e);
+                    }
+                };
+                warn!("ExtFS: allocated inode {} for {}", new_ino, path);
+
+                let mut new_inode = match self.read_inode(new_ino) {
+                    Ok(inode) => inode,
+                    Err(e) => {
+                        warn!("ExtFS: read_inode({}) failed for {}: {:?}", new_ino, path, e);
+                        return Err(e);
+                    }
+                };
+                new_inode.i_mode = Self::S_IFREG | ((mode as u16) & 0o777);
+                new_inode.i_size_lo = 0;
+                new_inode.i_links_count = 1;
+                new_inode.i_blocks_lo = 0;
+                if let Err(e) = self.write_inode_by_number(new_ino, &new_inode) {
+                    warn!("ExtFS: write_inode_by_number({}) failed for {}: {:?}", new_ino, path, e);
+                    return Err(e);
+                }
+
+                if let Err(e) = self.add_dir_entry(
+                    parent_ino,
+                    &file_name,
+                    new_ino,
+                    Self::file_type_from_mode(new_inode.i_mode),
+                ) {
+                    warn!(
+                        "ExtFS: add_dir_entry(parent={}, name={}, ino={}) failed for {}: {:?}",
+                        parent_ino, file_name, new_ino, path, e
+                    );
+                    return Err(e);
+                }
+
+                warn!("ExtFS: created path={} ino={}", path, new_ino);
+
+                new_ino
+            }
+            Err(e) => return Err(e),
+        };
+        let (mut inode, inode_offset) = self.read_inode_with_offset(ino)?;
+        let inode_size = Self::inode_rec_len(&self.sb);
+
+        if flags.contains(OpenFlags::O_TRUNC) {
+            if !can_write {
+                return Err(Error::PermissionDenied);
+            }
+            if (inode.i_mode & Self::S_IFMT) == Self::S_IFDIR {
+                return Err(Error::InvalidType);
+            }
+            inode.i_size_lo = 0;
+            self.write_inode_at_offset(&inode, inode_offset)?;
+        }
+
+        let append = flags.contains(OpenFlags::O_APPEND);
         let handle = ExtFileHandle {
             ops: self.ops.clone(),
             reader: self.reader.clone(),
+            ino,
             inode,
             block_size: self.block_size,
-            pos: 0,
+            pos: if append { inode.i_size_lo as usize } else { 0 },
             ring_vaddr: self.ring_vaddr,
             ring_size: self.ring_size,
             uring: None,
             user_shm_base: 0,
             server_shm_base: 0,
+            inode_offset,
+            inode_size,
+            sb: self.sb,
+            group_desc_size: self.group_desc_size,
+            can_read,
+            can_write,
+            append,
         };
         Ok(Box::new(handle))
     }
 
-    pub fn mkdir(&mut self, badge: Badge, _path: &str, _mode: u32) -> Result<(), Error> {
-        let tid = self.transaction_start(badge)?;
-        self.transaction_commit(badge, tid)?;
+    pub fn mkdir(&mut self, _badge: Badge, path: &str, mode: u32) -> Result<(), Error> {
+        if !self.writable {
+            return Err(Error::NotSupported);
+        }
+
+        if self.resolve_path(path).is_ok() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let (parent_path, name) = Self::split_parent_name(path)?;
+        let parent_ino = self.resolve_path(&parent_path)?;
+        let (mut parent_inode, parent_inode_off) = self.read_inode_with_offset(parent_ino)?;
+        if (parent_inode.i_mode & Self::S_IFMT) != Self::S_IFDIR {
+            return Err(Error::InvalidType);
+        }
+
+        let new_ino = self.alloc_inode()?;
+        let (mut new_inode, new_inode_off) = self.read_inode_with_offset(new_ino)?;
+        new_inode.i_mode = Self::S_IFDIR | ((mode as u16) & 0o777);
+        new_inode.i_links_count = 2;
+        new_inode.i_size_lo = self.block_size;
+        new_inode.i_blocks_lo = self.block_size / 512;
+
+        let data_block = self.alloc_block()?;
+        Self::set_inode_block_ptr(&mut new_inode, 0, data_block);
+
+        let mut block = alloc::vec![0u8; self.block_size as usize];
+        let dot = Self::dir_rec_len(1);
+        block[0..4].copy_from_slice(&new_ino.to_le_bytes());
+        block[4..6].copy_from_slice(&(dot as u16).to_le_bytes());
+        block[6] = 1;
+        block[7] = EXT4_FT_DIR;
+        block[8] = b'.';
+
+        let dd_off = dot;
+        let dd_rec = self.block_size as usize - dot;
+        block[dd_off..dd_off + 4].copy_from_slice(&parent_ino.to_le_bytes());
+        block[dd_off + 4..dd_off + 6].copy_from_slice(&(dd_rec as u16).to_le_bytes());
+        block[dd_off + 6] = 2;
+        block[dd_off + 7] = EXT4_FT_DIR;
+        block[dd_off + 8] = b'.';
+        block[dd_off + 9] = b'.';
+
+        self.reader.write_offset(data_block as usize * self.block_size as usize, &block)?;
+        self.write_inode_at_offset(&new_inode, new_inode_off)?;
+
+        self.add_dir_entry(parent_ino, &name, new_ino, EXT4_FT_DIR)?;
+        parent_inode.i_links_count = parent_inode.i_links_count.saturating_add(1);
+        self.write_inode_at_offset(&parent_inode, parent_inode_off)?;
         Ok(())
     }
 
-    pub fn unlink(&mut self, badge: Badge, _path: &str) -> Result<(), Error> {
-        let tid = self.transaction_start(badge)?;
-        self.transaction_commit(badge, tid)?;
+    pub fn unlink(&mut self, _badge: Badge, path: &str) -> Result<(), Error> {
+        if !self.writable {
+            return Err(Error::NotSupported);
+        }
+
+        let (parent_path, name) = Self::split_parent_name(path)?;
+        let parent_ino = self.resolve_path(&parent_path)?;
+        let (mut parent_inode, parent_inode_off) = self.read_inode_with_offset(parent_ino)?;
+
+        let target_ino = self.resolve_path(path)?;
+        let (mut target_inode, target_inode_off) = self.read_inode_with_offset(target_ino)?;
+
+        let is_dir = (target_inode.i_mode & Self::S_IFMT) == Self::S_IFDIR;
+        if is_dir {
+            if !self.is_dir_empty(target_ino)? {
+                return Err(Error::ResourceBusy);
+            }
+        }
+
+        let removed = self.remove_dir_entry(parent_ino, &name)?;
+        if removed != target_ino {
+            return Err(Error::IoError);
+        }
+
+        if is_dir {
+            target_inode.i_size_lo = 0;
+            target_inode.i_links_count = 0;
+            parent_inode.i_links_count = parent_inode.i_links_count.saturating_sub(1);
+            self.write_inode_at_offset(&parent_inode, parent_inode_off)?;
+        } else {
+            target_inode.i_links_count = target_inode.i_links_count.saturating_sub(1);
+        }
+
+        self.write_inode_at_offset(&target_inode, target_inode_off)?;
         Ok(())
     }
 
-    pub fn link(&mut self, _badge: Badge, _old_path: &str, _new_path: &str) -> Result<(), Error> {
-        // TODO: implement real hard-link creation (directory entry + inode link-count update)
-        // once ext write-path metadata operations are complete.
-        Err(Error::NotSupported)
+    pub fn link(&mut self, _badge: Badge, old_path: &str, new_path: &str) -> Result<(), Error> {
+        if !self.writable {
+            return Err(Error::NotSupported);
+        }
+
+        let old_ino = self.resolve_path(old_path)?;
+        let (mut old_inode, old_inode_off) = self.read_inode_with_offset(old_ino)?;
+        if (old_inode.i_mode & Self::S_IFMT) == Self::S_IFDIR {
+            return Err(Error::NotSupported);
+        }
+
+        if self.resolve_path(new_path).is_ok() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let (new_parent, new_name) = Self::split_parent_name(new_path)?;
+        let new_parent_ino = self.resolve_path(&new_parent)?;
+
+        self.add_dir_entry(
+            new_parent_ino,
+            &new_name,
+            old_ino,
+            Self::file_type_from_mode(old_inode.i_mode),
+        )?;
+        old_inode.i_links_count = old_inode.i_links_count.saturating_add(1);
+        self.write_inode_at_offset(&old_inode, old_inode_off)?;
+        Ok(())
     }
 
     pub fn stat_path(&mut self, _badge: Badge, path: &str) -> Result<Stat, Error> {
@@ -463,6 +1323,7 @@ impl ExtFs {
 pub struct ExtFileHandle {
     ops: Arc<dyn ExtOps>,
     reader: BlockReader,
+    ino: u32,
     inode: Inode,
     block_size: u32,
     pos: usize,
@@ -471,6 +1332,13 @@ pub struct ExtFileHandle {
     uring: Option<glenda::io::uring::IoUringBuffer>,
     user_shm_base: usize,
     server_shm_base: usize,
+    inode_offset: usize,
+    inode_size: usize,
+    sb: SuperBlock,
+    group_desc_size: u16,
+    can_read: bool,
+    can_write: bool,
+    append: bool,
 }
 
 impl FileHandleService for ExtFileHandle {
@@ -480,6 +1348,7 @@ impl FileHandleService for ExtFileHandle {
 
     fn stat(&self, _badge: Badge) -> Result<Stat, Error> {
         Ok(Stat {
+            ino: self.ino as usize,
             size: self.inode.i_size_lo as usize,
             mode: self.inode.i_mode as u32,
             ..Default::default()
@@ -487,6 +1356,16 @@ impl FileHandleService for ExtFileHandle {
     }
 
     fn read(&mut self, _badge: Badge, offset: usize, buf: &mut [u8]) -> Result<usize, Error> {
+        if !self.can_read {
+            return Err(Error::PermissionDenied);
+        }
+
+        let file_size = self.inode.i_size_lo as usize;
+        if offset >= file_size || buf.is_empty() {
+            return Ok(0);
+        }
+
+        let to_read = core::cmp::min(buf.len(), file_size - offset);
         let _start_block_idx = (offset / self.block_size as usize) as u32;
         // let end_block_idx = ((offset + buf.len() as usize + self.block_size as usize - 1)
         //     / self.block_size as usize) as u32;
@@ -496,7 +1375,7 @@ impl FileHandleService for ExtFileHandle {
         let mut buf_ptr = 0;
 
         // Simple loop
-        while buf_ptr < buf.len() {
+        while buf_ptr < to_read {
             let lblock = (current_offset / self.block_size as usize) as u32;
             let pblock = self
                 .ops
@@ -505,7 +1384,7 @@ impl FileHandleService for ExtFileHandle {
 
             let blk_offset_in_buf = (current_offset % self.block_size as usize) as usize;
             let chuck_len =
-                core::cmp::min(buf.len() - buf_ptr, self.block_size as usize - blk_offset_in_buf);
+                core::cmp::min(to_read - buf_ptr, self.block_size as usize - blk_offset_in_buf);
 
             if chuck_len == self.block_size as usize {
                 if pblock != 0 {
@@ -530,30 +1409,55 @@ impl FileHandleService for ExtFileHandle {
             read_len += chuck_len;
             current_offset += chuck_len as usize;
             buf_ptr += chuck_len;
-
-            if current_offset >= self.inode.i_size_lo as usize {
-                break;
-            }
         }
         Ok(read_len)
     }
 
     fn write(&mut self, _badge: Badge, offset: usize, buf: &[u8]) -> Result<usize, Error> {
+        if !self.can_write {
+            return Err(Error::PermissionDenied);
+        }
+        if !self.is_regular() {
+            return Err(Error::InvalidType);
+        }
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut current_offset = if self.append { self.inode.i_size_lo as usize } else { offset };
+        if current_offset > self.inode.i_size_lo as usize {
+            return Err(Error::NotSupported);
+        }
+
         let mut written = 0;
-        let mut current_offset = offset;
         let mut buf_ptr = 0;
+        let mut sb = self.sb;
+        let reader = self.reader.clone();
+        let block_size = self.block_size;
+        let group_desc_size = self.group_desc_size;
 
         while buf_ptr < buf.len() {
             let lblock = (current_offset / self.block_size as usize) as u32;
-            // This fails if block not allocated
-            let pblock = self
-                .ops
-                .get_block_addr(&self.reader, &self.inode, lblock, self.block_size)
-                .map_err(|_| Error::IoError)?;
-
-            if pblock == 0 {
-                return Err(Error::InternalError); // Cannot allocate in this simple handle
-            }
+            let mut alloc =
+                || ExtFs::alloc_block_raw(&reader, &mut sb, block_size, group_desc_size);
+            let pblock = match self.ops.map_block(
+                &self.reader,
+                &mut self.inode,
+                lblock,
+                self.block_size,
+                true,
+                &mut alloc,
+            ) {
+                Ok(pb) => pb,
+                Err(e) => {
+                    warn!(
+                        "ExtFS: write map_block failed ino={} lblock={} off={} err={:?}",
+                        self.ino, lblock, current_offset, e
+                    );
+                    return Err(Error::IoError);
+                }
+            };
 
             let blk_offset_in_buf = (current_offset % self.block_size as usize) as usize;
             let chuck_len =
@@ -563,24 +1467,70 @@ impl FileHandleService for ExtFileHandle {
             let device_block_addr = pblock as usize * (self.block_size / 512) as usize;
 
             if chuck_len == self.block_size as usize {
-                self.reader.write_blocks(device_block_addr, &buf[buf_ptr..buf_ptr + chuck_len])?;
+                if let Err(e) =
+                    self.reader.write_blocks(device_block_addr, &buf[buf_ptr..buf_ptr + chuck_len])
+                {
+                    warn!(
+                        "ExtFS: write write_blocks(full) failed ino={} lblock={} pblock={} dev_sector={} len={} err={:?}",
+                        self.ino,
+                        lblock,
+                        pblock,
+                        device_block_addr,
+                        chuck_len,
+                        e
+                    );
+                    return Err(e);
+                }
             } else {
                 // Read
                 let mut block_data = alloc::vec![0u8; self.block_size as usize];
-                self.reader.read_offset(read_offset, &mut block_data)?;
+                if let Err(e) = self.reader.read_offset(read_offset, &mut block_data) {
+                    warn!(
+                        "ExtFS: write read_offset(partial) failed ino={} lblock={} pblock={} read_off={} err={:?}",
+                        self.ino,
+                        lblock,
+                        pblock,
+                        read_offset,
+                        e
+                    );
+                    return Err(e);
+                }
 
                 // Modify
                 block_data[blk_offset_in_buf..blk_offset_in_buf + chuck_len]
                     .copy_from_slice(&buf[buf_ptr..buf_ptr + chuck_len]);
 
                 // Write
-                self.reader.write_blocks(device_block_addr, &block_data)?;
+                if let Err(e) = self.reader.write_blocks(device_block_addr, &block_data) {
+                    warn!(
+                        "ExtFS: write write_blocks(partial) failed ino={} lblock={} pblock={} dev_sector={} err={:?}",
+                        self.ino,
+                        lblock,
+                        pblock,
+                        device_block_addr,
+                        e
+                    );
+                    return Err(e);
+                }
             }
 
             written += chuck_len;
             current_offset += chuck_len as usize;
             buf_ptr += chuck_len;
         }
+
+        if current_offset > u32::MAX as usize {
+            return Err(Error::MessageTooLong);
+        }
+        self.sb = sb;
+        if current_offset > self.inode.i_size_lo as usize {
+            self.inode.i_size_lo = current_offset as u32;
+            self.flush_inode_metadata()?;
+        } else if written != 0 {
+            self.flush_inode_metadata()?;
+        }
+
+        self.pos = current_offset;
         Ok(written)
     }
 
@@ -679,7 +1629,20 @@ impl FileHandleService for ExtFileHandle {
     }
 
     fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<usize, Error> {
-        Err(Error::NotImplemented)
+        let base = match _whence {
+            seek::SEEK_SET => 0i128,
+            seek::SEEK_CUR => self.pos as i128,
+            seek::SEEK_END => self.inode.i_size_lo as i128,
+            _ => return Err(Error::InvalidArgs),
+        };
+
+        let new_pos = base + _offset as i128;
+        if new_pos < 0 || new_pos > usize::MAX as i128 {
+            return Err(Error::InvalidArgs);
+        }
+
+        self.pos = new_pos as usize;
+        Ok(self.pos)
     }
 
     fn sync(&mut self, _badge: Badge) -> Result<(), Error> {
@@ -687,7 +1650,48 @@ impl FileHandleService for ExtFileHandle {
     }
 
     fn truncate(&mut self, _badge: Badge, _size: usize) -> Result<(), Error> {
-        Err(Error::NotImplemented)
+        if !self.can_write {
+            return Err(Error::PermissionDenied);
+        }
+        if !self.is_regular() {
+            return Err(Error::InvalidType);
+        }
+
+        if _size > u32::MAX as usize {
+            return Err(Error::MessageTooLong);
+        }
+
+        let old_size = self.inode.i_size_lo as usize;
+        if _size > old_size {
+            let start_lblock = old_size.div_ceil(self.block_size as usize) as u32;
+            let end_lblock = (_size - 1) / self.block_size as usize;
+            let mut sb = self.sb;
+            let reader = self.reader.clone();
+            let block_size = self.block_size;
+            let group_desc_size = self.group_desc_size;
+            for lblock in start_lblock..=end_lblock as u32 {
+                let mut alloc =
+                    || ExtFs::alloc_block_raw(&reader, &mut sb, block_size, group_desc_size);
+                self.ops
+                    .map_block(
+                        &self.reader,
+                        &mut self.inode,
+                        lblock,
+                        self.block_size,
+                        true,
+                        &mut alloc,
+                    )
+                    .map_err(|_| Error::IoError)?;
+            }
+            self.sb = sb;
+        }
+
+        self.inode.i_size_lo = _size as u32;
+        if self.pos > _size {
+            self.pos = _size;
+        }
+        self.flush_inode_metadata()?;
+        Ok(())
     }
 }
 
@@ -707,6 +1711,37 @@ impl ExtFileHandle {
     #[inline]
     fn is_dir(&self) -> bool {
         (self.inode.i_mode & Self::S_IFMT) == Self::S_IFDIR
+    }
+
+    #[inline]
+    fn is_regular(&self) -> bool {
+        (self.inode.i_mode & Self::S_IFMT) == 0x8000
+    }
+
+    fn write_inode_to_disk(
+        reader: &BlockReader,
+        inode_offset: usize,
+        inode_size: usize,
+        inode: &Inode,
+    ) -> Result<(), Error> {
+        let mut disk_inode = alloc::vec![0u8; inode_size];
+        reader.read_offset(inode_offset, &mut disk_inode)?;
+
+        let inode_raw = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Inode as *const u8,
+                core::mem::size_of::<Inode>(),
+            )
+        };
+        let copy_len = core::cmp::min(inode_raw.len(), disk_inode.len());
+        disk_inode[..copy_len].copy_from_slice(&inode_raw[..copy_len]);
+
+        reader.write_offset(inode_offset, &disk_inode)?;
+        Ok(())
+    }
+
+    fn flush_inode_metadata(&self) -> Result<(), Error> {
+        Self::write_inode_to_disk(&self.reader, self.inode_offset, self.inode_size, &self.inode)
     }
 
     #[inline]
