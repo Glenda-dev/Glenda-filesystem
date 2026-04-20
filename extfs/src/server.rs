@@ -269,8 +269,9 @@ impl<'a> SystemService for Ext4Service<'a> {
                     } else {
                         u_inner.get_mr(0)
                     };
-                    let _ = handle.getdents(caller_badge, count)?;
-                    Err::<usize, Error>(Error::NotSupported)
+                    let dentries = handle.getdents(caller_badge, count)?;
+                    unsafe { u_inner.write_vec(&dentries)? };
+                    Ok(dentries.len())
                 })
             },
             (FS_PROTO, glenda::protocol::fs::SEEK) => |s: &mut Self, u: &mut UTCB| {

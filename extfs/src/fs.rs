@@ -585,7 +585,97 @@ impl FileHandleService for ExtFileHandle {
     }
 
     fn getdents(&mut self, _badge: Badge, _count: usize) -> Result<Vec<DEntry>, Error> {
-        Err(Error::NotImplemented)
+        let count = _count;
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        if !self.is_dir() {
+            return Err(Error::InvalidType);
+        }
+
+        let dir_size = self.inode.i_size_lo as usize;
+        if self.pos >= dir_size {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = Vec::new();
+        let mut packed_len = 0usize;
+        let mut cursor = self.pos;
+        let block_size = self.block_size as usize;
+        let max_entries_by_ipc = (glenda::ipc::IPC_BUFFER_SIZE
+            .saturating_sub(core::mem::size_of::<usize>()))
+            / core::mem::size_of::<DEntry>();
+        if max_entries_by_ipc == 0 {
+            return Err(Error::MessageTooLong);
+        }
+
+        while cursor < dir_size {
+            let lblock = (cursor / block_size) as u32;
+            let pblock = self
+                .ops
+                .get_block_addr(&self.reader, &self.inode, lblock, self.block_size)
+                .map_err(|_| Error::IoError)?;
+
+            if pblock == 0 {
+                cursor = ((cursor / block_size) + 1) * block_size;
+                continue;
+            }
+
+            let mut block_buf = alloc::vec![0u8; block_size];
+            let read_offset = pblock as usize * block_size;
+            self.reader.read_offset(read_offset, &mut block_buf)?;
+
+            let block_off = cursor % block_size;
+            if block_off + core::mem::size_of::<DirEntry2>() > block_size {
+                cursor = ((cursor / block_size) + 1) * block_size;
+                continue;
+            }
+
+            let ptr = unsafe { block_buf.as_ptr().add(block_off) };
+            let de = unsafe { core::ptr::read_unaligned(ptr as *const DirEntry2) };
+
+            let rec_len = de.rec_len as usize;
+            if rec_len < 8 || block_off + rec_len > block_size {
+                return Err(Error::IoError);
+            }
+
+            let next_off = cursor.saturating_add(rec_len);
+
+            if de.inode != 0 {
+                if packed_len.saturating_add(rec_len) > count {
+                    break;
+                }
+                if entries.len() >= max_entries_by_ipc {
+                    break;
+                }
+
+                let name_len = core::cmp::min(
+                    de.name_len as usize,
+                    core::cmp::min(rec_len.saturating_sub(8), 255),
+                );
+
+                let mut name = [0u8; 256];
+                let name_ptr = unsafe { ptr.add(8) };
+                let name_slice = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+                name[..name_len].copy_from_slice(name_slice);
+
+                entries.push(DEntry {
+                    d_ino: de.inode as usize,
+                    d_off: next_off as i64,
+                    d_reclen: de.rec_len,
+                    d_type: Self::ext4_file_type_to_dirent(de.file_type),
+                    d_name: name,
+                });
+
+                packed_len = packed_len.saturating_add(rec_len);
+            }
+
+            cursor = next_off;
+        }
+
+        self.pos = core::cmp::min(cursor, dir_size);
+        Ok(entries)
     }
 
     fn seek(&mut self, _badge: Badge, _offset: i64, _whence: usize) -> Result<usize, Error> {
@@ -602,6 +692,38 @@ impl FileHandleService for ExtFileHandle {
 }
 
 impl ExtFileHandle {
+    const S_IFMT: u16 = 0xF000;
+    const S_IFDIR: u16 = 0x4000;
+
+    const DT_UNKNOWN: u8 = 0;
+    const DT_FIFO: u8 = 1;
+    const DT_CHR: u8 = 2;
+    const DT_DIR: u8 = 4;
+    const DT_BLK: u8 = 6;
+    const DT_REG: u8 = 8;
+    const DT_LNK: u8 = 10;
+    const DT_SOCK: u8 = 12;
+
+    #[inline]
+    fn is_dir(&self) -> bool {
+        (self.inode.i_mode & Self::S_IFMT) == Self::S_IFDIR
+    }
+
+    #[inline]
+    fn ext4_file_type_to_dirent(file_type: u8) -> u8 {
+        match file_type {
+            EXT4_FT_UNKNOWN => Self::DT_UNKNOWN,
+            EXT4_FT_REG_FILE => Self::DT_REG,
+            EXT4_FT_DIR => Self::DT_DIR,
+            3 => Self::DT_CHR,
+            4 => Self::DT_BLK,
+            5 => Self::DT_FIFO,
+            6 => Self::DT_SOCK,
+            7 => Self::DT_LNK,
+            _ => Self::DT_UNKNOWN,
+        }
+    }
+
     fn read_shm_internal(&self, offset: usize, len: u32, shm_vaddr: usize) -> Result<usize, Error> {
         let mut read_len = 0;
         let mut current_offset = offset;
