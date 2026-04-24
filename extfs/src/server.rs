@@ -1,13 +1,13 @@
 use crate::fs::ExtFs;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use glenda::cap::{CapPtr, CapType, Endpoint, Reply, CSPACE_CAP};
+use glenda::cap::{CSPACE_CAP, CapPtr, CapType, Endpoint, Reply};
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::fs::FileHandleService;
 use glenda::interface::system::SystemService;
 use glenda::interface::{CSpaceService, ResourceService, VSpaceService};
-use glenda::io::uring::{IoUringBuffer, IoUringCqe, IOURING_OP_READ};
+use glenda::io::uring::{IOURING_OP_READ, IoUringBuffer, IoUringCqe};
 use glenda::ipc::server::handle_call;
 use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
 use glenda::mem::Perms;
@@ -85,19 +85,11 @@ impl<'a> Ext4Service<'a> {
     }
 
     fn handle_id_from_badge(badge: Badge) -> usize {
-        if usize::BITS > 32 {
-            badge.bits() >> 32
-        } else {
-            badge.bits()
-        }
+        if usize::BITS > 32 { badge.bits() >> 32 } else { badge.bits() }
     }
 
     fn caller_badge_from_badge(badge: Badge) -> Badge {
-        if usize::BITS > 32 {
-            Badge::new(badge.bits() & 0xffff_ffffusize)
-        } else {
-            badge
-        }
+        if usize::BITS > 32 { Badge::new(badge.bits() & 0xffff_ffffusize) } else { badge }
     }
 
     fn alloc_handle_badge(&mut self, caller_badge: Badge) -> (usize, Badge) {

@@ -17,7 +17,7 @@ pub struct BiosParameterBlock {
     pub num_heads: u16,
     pub hidd_sec: u32,
     pub tot_sec_32: u32,
-    
+
     // FAT32 Structure
     pub fat_sz_32: u32,
     pub ext_flags: u16,
@@ -33,7 +33,6 @@ pub struct BiosParameterBlock {
     pub vol_lab: [u8; 11],
     pub fil_sys_type: [u8; 8],
 }
-
 
 pub const ATTR_READ_ONLY: u8 = 0x01;
 pub const ATTR_HIDDEN: u8 = 0x02;

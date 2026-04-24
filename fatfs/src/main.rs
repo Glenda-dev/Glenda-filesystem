@@ -59,7 +59,9 @@ fn main() -> usize {
         panic!("FatFS: Failed to init system service: {:?}", e);
     }
 
-    if let Err(e) = vol_client.report_state(Badge::null(), ServiceState::Running, Some(ENDPOINT_SLOT)) {
+    if let Err(e) =
+        vol_client.report_state(Badge::null(), ServiceState::Running, Some(ENDPOINT_SLOT))
+    {
         panic!("FatFS: Failed to report running state: {:?}", e);
     }
 

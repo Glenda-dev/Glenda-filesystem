@@ -1,11 +1,11 @@
 use glenda::cap::Endpoint;
+use glenda::client::volume::VolumeClient;
+use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::io::uring::IoUringClient;
-use glenda::mem::shm::SharedMemory;
-use glenda::client::volume::VolumeClient;
 use glenda::io::uring::RingParams;
+use glenda::mem::shm::SharedMemory;
 use glenda::mem::shm::ShmParams;
-use glenda::client::ResourceClient;
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 extern crate alloc;
 
@@ -28,12 +28,14 @@ impl BlockReader {
         ring_params: RingParams,
         shm_params: ShmParams,
     ) -> Self {
-        Self {
-            client: VolumeClient::new(endpoint, res_client, ring_params, shm_params),
-        }
+        Self { client: VolumeClient::new(endpoint, res_client, ring_params, shm_params) }
     }
 
-    pub fn init(&mut self, vspace: &mut VSpaceManager, cspace: &mut CSpaceManager) -> Result<(), Error> {
+    pub fn init(
+        &mut self,
+        vspace: &mut VSpaceManager,
+        cspace: &mut CSpaceManager,
+    ) -> Result<(), Error> {
         self.client.connect(vspace, cspace)
     }
 
