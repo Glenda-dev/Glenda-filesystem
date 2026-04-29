@@ -58,7 +58,7 @@ fn main() -> usize {
         .expect("Failed to get VFS endpoint");
     let mut vfs_client = FsClient::new(Endpoint::from(vfs_cap));
     let mut cspace_mgr = CSpaceManager::new(glenda::cap::CSPACE_CAP, 16);
-    let mut vspace_mgr = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x8000_0000);
+    let mut vspace_mgr = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x1000_0000);
 
     let mut server = server::InitrdServer::new(
         dev_cap,
